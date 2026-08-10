@@ -151,6 +151,13 @@ export {
   type CreateDecisionArchiveProposalInput,
 } from "./validators/decision-queue.js";
 export type {
+  CodexAccount,
+  CodexAccountAgent,
+  CodexAccountLoginState,
+  CodexAccountLoginStatus,
+  CodexAccountsOverview,
+} from "./types/codex-account.js";
+export type {
   DecisionTrainingExample,
   DecisionTrainingNotesHistoryEntry,
   DecisionTrainingPreview,

@@ -5,6 +5,9 @@ export const queryKeys = {
     stats: ["companies", "stats"] as const,
     exportFidelity: (companyId: string) => ["companies", companyId, "export-fidelity"] as const,
   },
+  codexAccounts: {
+    list: (companyId: string) => ["codex-accounts", companyId] as const,
+  },
   apps: {
     gallery: (companyId: string) => ["apps", companyId, "gallery"] as const,
     attention: (companyId: string) => ["apps", companyId, "attention"] as const,

@@ -7,6 +7,7 @@ const items = [
   { value: "general", label: "General", href: "/company/settings" },
   { value: "export", label: "Export", href: "/company/export" },
   { value: "import", label: "Import", href: "/company/import" },
+  { value: "codex-accounts", label: "Codex accounts", href: "/company/settings/codex-accounts" },
   { value: "members", label: "Members", href: "/company/settings/members" },
   { value: "invites", label: "Invites", href: "/company/settings/invites" },
   { value: "secrets", label: "Secrets", href: "/company/settings/secrets" },
@@ -65,6 +66,10 @@ export function getCompanySettingsTab(pathname: string): CompanySettingsTab {
 
   if (pathname.includes("/company/import")) {
     return "import";
+  }
+
+  if (pathname.includes("/company/settings/codex-accounts")) {
+    return "codex-accounts";
   }
 
   if (pathname.includes("/company/settings/members") || pathname.includes("/company/settings/access")) {

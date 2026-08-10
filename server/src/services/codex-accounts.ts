@@ -1,0 +1,477 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { and, asc, eq, ne } from "drizzle-orm";
+import type { Db } from "@paperclipai/db";
+import { agents, codexAccounts } from "@paperclipai/db";
+import type {
+  CodexAccountLoginState,
+  CodexAccountsOverview,
+} from "@paperclipai/shared";
+import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
+import {
+  codexHomeHasUsableAuth,
+  readCodexAuthInfo,
+} from "@paperclipai/adapter-codex-local/server";
+import { conflict, notFound, unprocessable } from "../errors.js";
+import { agentService } from "./agents.js";
+
+const LOGIN_LIFETIME_MS = 15 * 60 * 1000;
+const LOGIN_PROMPT_WAIT_MS = 15_000;
+const LOGIN_OUTPUT_LIMIT = 16_000;
+const ANSI_ESCAPE_RE = /\u001b\[[0-?]*[ -\/]*[@-~]/g;
+const DEVICE_URL_RE = /https:\/\/[^\s]+\/codex\/device/i;
+const DEVICE_CODE_RE = /\b[A-Z0-9]{4,6}-[A-Z0-9]{4,6}\b/i;
+
+export interface CodexLoginCommand {
+  command: string;
+  args: string[];
+  detached: boolean;
+}
+
+type InternalLoginStatus = "waiting_for_user" | "authenticated" | "failed" | "expired";
+
+interface LoginSession {
+  accountId: string;
+  companyId: string;
+  process: ChildProcess;
+  active: boolean;
+  status: InternalLoginStatus;
+  verificationUrl: string | null;
+  userCode: string | null;
+  startedAt: string;
+  expiresAt: string;
+  error: string | null;
+  output: string;
+  promptWaiters: Set<() => void>;
+  expiryTimer: NodeJS.Timeout;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function readPlainEnvValue(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  const record = asRecord(value);
+  if (record?.type !== "plain") return null;
+  return typeof record.value === "string" ? record.value.trim() || null : null;
+}
+
+function hasConfiguredApiKey(adapterConfig: unknown): boolean {
+  const env = asRecord(asRecord(adapterConfig)?.env);
+  const value = env?.OPENAI_API_KEY;
+  if (readPlainEnvValue(value)) return true;
+  const binding = asRecord(value);
+  return binding?.type === "secret_ref" && typeof binding.secretId === "string";
+}
+
+function publicLoginState(session: LoginSession | undefined): CodexAccountLoginState {
+  if (!session) {
+    return {
+      status: "idle",
+      verificationUrl: null,
+      userCode: null,
+      startedAt: null,
+      expiresAt: null,
+      error: null,
+    };
+  }
+  return {
+    status: session.status,
+    verificationUrl: session.verificationUrl,
+    userCode: session.userCode,
+    startedAt: session.startedAt,
+    expiresAt: session.expiresAt,
+    error: session.error,
+  };
+}
+
+function resolveCodexExecutable(): string {
+  const configured = process.env.PAPERCLIP_CODEX_EXECUTABLE?.trim();
+  return configured || "codex";
+}
+
+function quotePosixShellArg(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+export function resolveCodexLoginCommand(
+  executable: string = resolveCodexExecutable(),
+  platform: NodeJS.Platform = process.platform,
+): CodexLoginCommand {
+  // Codex intentionally writes the device URL and one-time code only when it
+  // has a terminal. Paperclip normally runs as a background service, so give
+  // the login subprocess a pseudo-terminal via the platform's `script` tool.
+  if (platform === "darwin") {
+    return {
+      command: "/usr/bin/script",
+      args: ["-q", "/dev/null", executable, "login", "--device-auth"],
+      detached: true,
+    };
+  }
+  if (platform === "linux") {
+    return {
+      command: "/usr/bin/script",
+      args: [
+        "-q",
+        "-e",
+        "-c",
+        `${quotePosixShellArg(executable)} login --device-auth`,
+        "/dev/null",
+      ],
+      detached: true,
+    };
+  }
+  return {
+    command: executable,
+    args: ["login", "--device-auth"],
+    detached: false,
+  };
+}
+
+export function parseCodexDevicePrompt(output: string): {
+  verificationUrl: string | null;
+  userCode: string | null;
+} {
+  const cleaned = output.replace(ANSI_ESCAPE_RE, "");
+  return {
+    verificationUrl: cleaned.match(DEVICE_URL_RE)?.[0] ?? null,
+    userCode: cleaned.match(DEVICE_CODE_RE)?.[0]?.toUpperCase() ?? null,
+  };
+}
+
+export function resolveCodexAccountHome(companyId: string, accountId: string): string {
+  const instanceRoot = resolvePaperclipInstanceRootForAdapter({
+    homeDir: process.env.PAPERCLIP_HOME?.trim() || undefined,
+    instanceId: process.env.PAPERCLIP_INSTANCE_ID?.trim() || undefined,
+    env: process.env,
+  });
+  return path.resolve(
+    instanceRoot,
+    "companies",
+    companyId,
+    "codex-accounts",
+    accountId,
+    "codex-home",
+  );
+}
+
+export function codexAccountService(db: Db) {
+  const loginSessions = new Map<string, LoginSession>();
+  const agentsSvc = agentService(db);
+
+  async function requireAccount(companyId: string, accountId: string) {
+    const account = await db
+      .select()
+      .from(codexAccounts)
+      .where(and(eq(codexAccounts.companyId, companyId), eq(codexAccounts.id, accountId)))
+      .then((rows) => rows[0] ?? null);
+    if (!account) throw notFound("Codex account not found");
+    return account;
+  }
+
+  function notifyPromptWaiters(session: LoginSession) {
+    for (const resolve of session.promptWaiters) resolve();
+    session.promptWaiters.clear();
+  }
+
+  function parseLoginOutput(session: LoginSession, chunk: Buffer | string) {
+    session.output = `${session.output}${String(chunk)}`
+      .replace(ANSI_ESCAPE_RE, "")
+      .slice(-LOGIN_OUTPUT_LIMIT);
+    const prompt = parseCodexDevicePrompt(session.output);
+    session.verificationUrl = prompt.verificationUrl ?? session.verificationUrl;
+    session.userCode = prompt.userCode ?? session.userCode;
+    if (session.verificationUrl && session.userCode) notifyPromptWaiters(session);
+  }
+
+  function terminateLoginProcess(
+    session: LoginSession,
+    signal: NodeJS.Signals = "SIGTERM",
+  ) {
+    const pid = session.process.pid;
+    if (pid && process.platform !== "win32") {
+      try {
+        process.kill(-pid, signal);
+        return;
+      } catch {
+        // The wrapper may have exited before its child. Fall back to the
+        // regular ChildProcess kill path below.
+      }
+    }
+    session.process.kill(signal);
+  }
+
+  async function finishLogin(session: LoginSession, exitCode: number | null) {
+    if (!session.active) return;
+    session.active = false;
+    clearTimeout(session.expiryTimer);
+    const authenticated = exitCode === 0 && await codexHomeHasUsableAuth(
+      resolveCodexAccountHome(session.companyId, session.accountId),
+    );
+    if (authenticated) {
+      session.status = "authenticated";
+      session.error = null;
+      await db
+        .update(codexAccounts)
+        .set({ lastAuthenticatedAt: new Date(), updatedAt: new Date() })
+        .where(eq(codexAccounts.id, session.accountId));
+    } else if (session.status !== "expired" && session.status !== "failed") {
+      session.status = "failed";
+      session.error = exitCode === null
+        ? "Codex login ended before authentication completed."
+        : "Codex did not complete authentication. Start a new login and try again.";
+    }
+    session.output = "";
+    notifyPromptWaiters(session);
+  }
+
+  async function waitForLoginPrompt(session: LoginSession) {
+    if (session.verificationUrl && session.userCode) return;
+    if (!session.active || session.status !== "waiting_for_user") return;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        session.promptWaiters.delete(done);
+        resolve();
+      }, LOGIN_PROMPT_WAIT_MS);
+      const done = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      session.promptWaiters.add(done);
+    });
+  }
+
+  return {
+    list: async (companyId: string): Promise<CodexAccountsOverview> => {
+      const [accountRows, agentRows] = await Promise.all([
+        db
+          .select()
+          .from(codexAccounts)
+          .where(eq(codexAccounts.companyId, companyId))
+          .orderBy(asc(codexAccounts.createdAt)),
+        db
+          .select({
+            id: agents.id,
+            name: agents.name,
+            status: agents.status,
+            codexAccountId: agents.codexAccountId,
+            adapterConfig: agents.adapterConfig,
+          })
+          .from(agents)
+          .where(and(
+            eq(agents.companyId, companyId),
+            eq(agents.adapterType, "codex_local"),
+            ne(agents.status, "terminated"),
+          ))
+          .orderBy(asc(agents.name)),
+      ]);
+
+      const accountSummaries = await Promise.all(accountRows.map(async (account) => {
+        const auth = await readCodexAuthInfo(resolveCodexAccountHome(companyId, account.id));
+        const loginSession = loginSessions.get(account.id);
+        const login = publicLoginState(loginSession);
+        if (auth && login.status === "idle") login.status = "authenticated";
+        return {
+          id: account.id,
+          companyId: account.companyId,
+          name: account.name,
+          authenticated: auth != null,
+          email: auth?.email ?? null,
+          planType: auth?.planType ?? null,
+          lastRefresh: auth?.lastRefresh ?? null,
+          lastAuthenticatedAt: account.lastAuthenticatedAt?.toISOString() ?? null,
+          assignedAgentIds: agentRows
+            .filter((agent) => agent.codexAccountId === account.id)
+            .map((agent) => agent.id),
+          login,
+          createdAt: account.createdAt.toISOString(),
+          updatedAt: account.updatedAt.toISOString(),
+        };
+      }));
+
+      return {
+        accounts: accountSummaries,
+        agents: agentRows.map((agent) => {
+          const apiKeyConfigured = hasConfiguredApiKey(agent.adapterConfig);
+          return {
+            id: agent.id,
+            name: agent.name,
+            status: agent.status as CodexAccountsOverview["agents"][number]["status"],
+            codexAccountId: agent.codexAccountId,
+            canUseSubscriptionAccount: !apiKeyConfigured,
+            subscriptionAccountBlocker: apiKeyConfigured
+              ? "This agent is configured with OPENAI_API_KEY. Remove that binding before assigning a ChatGPT account."
+              : null,
+          };
+        }),
+      };
+    },
+
+    create: async (companyId: string, name: string) => {
+      const id = randomUUID();
+      const home = resolveCodexAccountHome(companyId, id);
+      await fs.mkdir(home, { recursive: true, mode: 0o700 });
+      try {
+        return await db
+          .insert(codexAccounts)
+          .values({ id, companyId, name: name.trim() })
+          .returning()
+          .then((rows) => rows[0]!);
+      } catch (error) {
+        await fs.rm(path.dirname(home), { recursive: true, force: true }).catch(() => undefined);
+        throw error;
+      }
+    },
+
+    startLogin: async (companyId: string, accountId: string): Promise<CodexAccountLoginState> => {
+      await requireAccount(companyId, accountId);
+      const current = loginSessions.get(accountId);
+      if (current?.active) return publicLoginState(current);
+
+      const home = resolveCodexAccountHome(companyId, accountId);
+      await fs.mkdir(home, { recursive: true, mode: 0o700 });
+      const startedAt = new Date();
+      const expiresAt = new Date(startedAt.getTime() + LOGIN_LIFETIME_MS);
+      const loginCommand = resolveCodexLoginCommand();
+      const child = spawn(loginCommand.command, loginCommand.args, {
+        env: { ...process.env, CODEX_HOME: home },
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: false,
+        detached: loginCommand.detached,
+      });
+      const session: LoginSession = {
+        accountId,
+        companyId,
+        process: child,
+        active: true,
+        status: "waiting_for_user",
+        verificationUrl: null,
+        userCode: null,
+        startedAt: startedAt.toISOString(),
+        expiresAt: expiresAt.toISOString(),
+        error: null,
+        output: "",
+        promptWaiters: new Set<() => void>(),
+        expiryTimer: setTimeout(() => undefined, LOGIN_LIFETIME_MS),
+      };
+      clearTimeout(session.expiryTimer);
+      session.expiryTimer = setTimeout(() => {
+        if (!session.active) return;
+        session.status = "expired";
+        session.error = "The device code expired. Start a new login to continue.";
+        terminateLoginProcess(session);
+        notifyPromptWaiters(session);
+      }, LOGIN_LIFETIME_MS);
+      session.expiryTimer.unref();
+      loginSessions.set(accountId, session);
+
+      child.stdout.on("data", (chunk) => parseLoginOutput(session, chunk));
+      child.stderr.on("data", (chunk) => parseLoginOutput(session, chunk));
+      child.once("error", () => {
+        if (!session.active) return;
+        session.active = false;
+        clearTimeout(session.expiryTimer);
+        session.status = "failed";
+        session.error = `Could not start ${resolveCodexExecutable()}. Ensure the Codex CLI is installed and available to Paperclip.`;
+        session.output = "";
+        notifyPromptWaiters(session);
+      });
+      child.once("close", (exitCode) => {
+        void finishLogin(session, exitCode).catch(() => {
+          session.active = false;
+          session.status = "failed";
+          session.error = "Paperclip could not verify the completed Codex login.";
+          session.output = "";
+          notifyPromptWaiters(session);
+        });
+      });
+
+      await waitForLoginPrompt(session);
+      if (
+        session.active
+        && session.status === "waiting_for_user"
+        && (!session.verificationUrl || !session.userCode)
+      ) {
+        session.active = false;
+        clearTimeout(session.expiryTimer);
+        session.status = "failed";
+        session.error = "Codex did not provide a device login code. Verify that device-code authentication is enabled, then try again.";
+        session.output = "";
+        terminateLoginProcess(session);
+        notifyPromptWaiters(session);
+      }
+      return publicLoginState(session);
+    },
+
+    assignAgent: async (
+      companyId: string,
+      agentId: string,
+      accountId: string | null,
+      actor: { agentId?: string | null; userId?: string | null },
+    ) => {
+      const agent = await agentsSvc.getById(agentId);
+      if (!agent || agent.companyId !== companyId) throw notFound("Agent not found");
+      if (agent.adapterType !== "codex_local") {
+        throw unprocessable("Only Codex agents can be assigned to a Codex account");
+      }
+      if (hasConfiguredApiKey(agent.adapterConfig)) {
+        throw conflict("Remove OPENAI_API_KEY from this agent before assigning a ChatGPT account");
+      }
+
+      const adapterConfig = { ...agent.adapterConfig };
+      const env = { ...(asRecord(adapterConfig.env) ?? {}) };
+      if (accountId) {
+        await requireAccount(companyId, accountId);
+        const home = resolveCodexAccountHome(companyId, accountId);
+        if (!(await codexHomeHasUsableAuth(home))) {
+          throw conflict("Authenticate this Codex account before assigning agents to it");
+        }
+        env.CODEX_HOME = home;
+      } else if (agent.codexAccountId) {
+        const assignedHome = resolveCodexAccountHome(companyId, agent.codexAccountId);
+        if (readPlainEnvValue(env.CODEX_HOME) === assignedHome) delete env.CODEX_HOME;
+      }
+      adapterConfig.env = env;
+
+      const updated = await agentsSvc.update(
+        agentId,
+        { codexAccountId: accountId, adapterConfig },
+        {
+          recordRevision: {
+            createdByAgentId: actor.agentId ?? null,
+            createdByUserId: actor.userId ?? null,
+            source: "codex_account_assignment",
+          },
+        },
+      );
+      if (!updated) throw notFound("Agent not found");
+      return updated;
+    },
+
+    remove: async (companyId: string, accountId: string) => {
+      await requireAccount(companyId, accountId);
+      const assigned = await db
+        .select({ id: agents.id })
+        .from(agents)
+        .where(eq(agents.codexAccountId, accountId));
+      if (assigned.length > 0) {
+        throw conflict("Unassign all agents before removing this Codex account");
+      }
+      const session = loginSessions.get(accountId);
+      if (session?.active) terminateLoginProcess(session);
+      loginSessions.delete(accountId);
+      await fs.rm(path.dirname(resolveCodexAccountHome(companyId, accountId)), {
+        recursive: true,
+        force: true,
+      });
+      await db
+        .delete(codexAccounts)
+        .where(and(eq(codexAccounts.companyId, companyId), eq(codexAccounts.id, accountId)));
+    },
+  };
+}

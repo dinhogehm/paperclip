@@ -91,6 +91,7 @@ export interface Agent {
   reportsTo: string | null;
   capabilities: string | null;
   adapterType: AgentAdapterType;
+  codexAccountId?: string | null;
   adapterConfig: Record<string, unknown>;
   runtimeConfig: AgentRuntimeConfig;
   defaultEnvironmentId?: string | null;

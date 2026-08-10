@@ -6,6 +6,7 @@ import {
   Download,
   FlaskConical,
   KeyRound,
+  CircleUserRound,
   MailPlus,
   MonitorCog,
   Puzzle,
@@ -102,6 +103,12 @@ export function CompanySettingsSidebar() {
           <SidebarNavItem to="/company/settings" label="General" icon={SlidersHorizontal} end />
           <SidebarNavItem to="/company/export" label="Export" icon={Download} />
           <SidebarNavItem to="/company/import" label="Import" icon={Upload} end />
+          <SidebarNavItem
+            to="/company/settings/codex-accounts"
+            label="Codex accounts"
+            icon={CircleUserRound}
+            end
+          />
           <SidebarNavItem
             to="/company/settings/members"
             label="Members"
