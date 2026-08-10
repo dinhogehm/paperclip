@@ -158,6 +158,7 @@ Invariant: every business record belongs to exactly one company.
 - `reports_to` uuid fk `agents.id` null
 - `capabilities` text null
 - `adapter_type` text; built-ins include `process`, `http`, `claude_local`, `codex_local`, `gemini_local`, `opencode_local`, `pi_local`, `cursor`, `hermes_local`, `hermes_gateway`, and `openclaw_gateway`
+- `codex_account_mode` text not null default `host`; `host`, `fixed`, or quota-aware `first_available`
 - `codex_account_id` uuid fk `codex_accounts.id` null; selects an isolated company-managed ChatGPT subscription profile for `codex_local` agents
 - `adapter_config` jsonb not null
 - `runtime_config` jsonb not null default `{}`; may include Paperclip runtime policy such as `modelProfiles.cheap.adapterConfig` for an optional low-cost model lane that does not change the primary adapter config
@@ -176,6 +177,7 @@ Invariants:
 - no cycles in reporting tree
 - `terminated` agents cannot be resumed
 - a selected Codex account must belong to the same company and cannot be combined with an `OPENAI_API_KEY` binding
+- `first_available` resolves an authenticated company account at each run boundary, skipping profiles whose reported quota windows are exhausted
 
 ## 7.2.1 `codex_accounts`
 
@@ -184,11 +186,12 @@ Invariants:
 - `name` text not null
 - `last_authenticated_at` timestamptz null
 
-The database stores only the account label, company ownership, assignment, and
+The database stores only the account label, company ownership, selection mode, assignment, and
 authentication timestamp. Codex subscription credentials remain in a dedicated
 Paperclip-managed `CODEX_HOME` on the local filesystem. Account names are unique
 within a company, deletion cascades from the company, and deleting an account
-clears agent assignments.
+clears fixed agent assignments. Automatic selection remains enabled and resolves
+from the authenticated accounts that still exist.
 
 ## 7.3 `agent_api_keys`
 

@@ -281,8 +281,10 @@ export type {
 export type {
   CodexAccount,
   CodexAccountAgent,
+  CodexAccountAssignment,
   CodexAccountLoginState,
   CodexAccountLoginStatus,
+  CodexAccountMode,
   CodexAccountsOverview,
 } from "./codex-account.js";
 export type {

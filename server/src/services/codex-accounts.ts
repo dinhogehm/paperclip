@@ -6,12 +6,15 @@ import { and, asc, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, codexAccounts } from "@paperclipai/db";
 import type {
+  CodexAccountAssignment,
   CodexAccountLoginState,
+  CodexAccountMode,
   CodexAccountsOverview,
 } from "@paperclipai/shared";
 import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
 import {
   codexHomeHasUsableAuth,
+  fetchCodexQuota,
   readCodexAuthInfo,
 } from "@paperclipai/adapter-codex-local/server";
 import { conflict, notFound, unprocessable } from "../errors.js";
@@ -160,6 +163,83 @@ export function resolveCodexAccountHome(companyId: string, accountId: string): s
   );
 }
 
+interface AutoSelectableCodexAccount {
+  id: string;
+  companyId: string;
+  name: string;
+}
+
+export interface FirstAvailableCodexAccountSelection {
+  accountId: string;
+  accountName: string;
+  codexHome: string;
+  quotaState: "available" | "unknown" | "exhausted_fallback";
+}
+
+export async function selectFirstAvailableCodexAccount(input: {
+  accounts: AutoSelectableCodexAccount[];
+  readAuthInfo?: typeof readCodexAuthInfo;
+  fetchQuota?: typeof fetchCodexQuota;
+}): Promise<FirstAvailableCodexAccountSelection | null> {
+  const readAuthInfo = input.readAuthInfo ?? readCodexAuthInfo;
+  const fetchQuota = input.fetchQuota ?? fetchCodexQuota;
+  let quotaUnknownFallback: FirstAvailableCodexAccountSelection | null = null;
+  let exhaustedFallback: FirstAvailableCodexAccountSelection | null = null;
+
+  for (const account of input.accounts) {
+    const codexHome = resolveCodexAccountHome(account.companyId, account.id);
+    const auth = await readAuthInfo(codexHome);
+    if (!auth) continue;
+
+    try {
+      const windows = await fetchQuota(auth.accessToken, auth.accountId);
+      const exhausted = windows.some(
+        (window) => window.usedPercent != null && window.usedPercent >= 100,
+      );
+      const selection: FirstAvailableCodexAccountSelection = {
+        accountId: account.id,
+        accountName: account.name,
+        codexHome,
+        quotaState: exhausted ? "exhausted_fallback" : "available",
+      };
+      if (!exhausted) return selection;
+      exhaustedFallback ??= selection;
+    } catch {
+      quotaUnknownFallback ??= {
+        accountId: account.id,
+        accountName: account.name,
+        codexHome,
+        quotaState: "unknown",
+      };
+    }
+  }
+
+  // A transient quota-probe outage must not stop the delivery queue. If every
+  // authenticated account is exhausted, let the adapter's provider-quota
+  // classification schedule the existing reset-aware retry.
+  return quotaUnknownFallback ?? exhaustedFallback;
+}
+
+export async function resolveFirstAvailableCodexAccount(
+  db: Db,
+  companyId: string,
+): Promise<FirstAvailableCodexAccountSelection | null> {
+  const accountRows = await db
+    .select({
+      id: codexAccounts.id,
+      companyId: codexAccounts.companyId,
+      name: codexAccounts.name,
+    })
+    .from(codexAccounts)
+    .where(eq(codexAccounts.companyId, companyId))
+    .orderBy(asc(codexAccounts.createdAt));
+  return selectFirstAvailableCodexAccount({ accounts: accountRows });
+}
+
+function normalizeCodexAccountMode(value: string): CodexAccountMode {
+  return value === "fixed" || value === "first_available" ? value : "host";
+}
+
 export function codexAccountService(db: Db) {
   const loginSessions = new Map<string, LoginSession>();
   const agentsSvc = agentService(db);
@@ -259,6 +339,7 @@ export function codexAccountService(db: Db) {
             id: agents.id,
             name: agents.name,
             status: agents.status,
+            codexAccountMode: agents.codexAccountMode,
             codexAccountId: agents.codexAccountId,
             adapterConfig: agents.adapterConfig,
           })
@@ -302,6 +383,7 @@ export function codexAccountService(db: Db) {
             id: agent.id,
             name: agent.name,
             status: agent.status as CodexAccountsOverview["agents"][number]["status"],
+            codexAccountMode: normalizeCodexAccountMode(agent.codexAccountMode),
             codexAccountId: agent.codexAccountId,
             canUseSubscriptionAccount: !apiKeyConfigured,
             subscriptionAccountBlocker: apiKeyConfigured
@@ -411,7 +493,7 @@ export function codexAccountService(db: Db) {
     assignAgent: async (
       companyId: string,
       agentId: string,
-      accountId: string | null,
+      assignment: CodexAccountAssignment,
       actor: { agentId?: string | null; userId?: string | null },
     ) => {
       const agent = await agentsSvc.getById(agentId);
@@ -425,22 +507,46 @@ export function codexAccountService(db: Db) {
 
       const adapterConfig = { ...agent.adapterConfig };
       const env = { ...(asRecord(adapterConfig.env) ?? {}) };
-      if (accountId) {
+      if (agent.codexAccountId) {
+        const assignedHome = resolveCodexAccountHome(companyId, agent.codexAccountId);
+        if (readPlainEnvValue(env.CODEX_HOME) === assignedHome) delete env.CODEX_HOME;
+      }
+
+      const accountId = assignment.mode === "fixed" ? assignment.accountId : null;
+      if (assignment.mode === "fixed") {
+        if (!accountId) throw unprocessable("A fixed Codex account requires an account identifier");
         await requireAccount(companyId, accountId);
         const home = resolveCodexAccountHome(companyId, accountId);
         if (!(await codexHomeHasUsableAuth(home))) {
           throw conflict("Authenticate this Codex account before assigning agents to it");
         }
         env.CODEX_HOME = home;
-      } else if (agent.codexAccountId) {
-        const assignedHome = resolveCodexAccountHome(companyId, agent.codexAccountId);
-        if (readPlainEnvValue(env.CODEX_HOME) === assignedHome) delete env.CODEX_HOME;
+      } else if (assignment.mode === "first_available") {
+        const accountRows = await db
+          .select({ id: codexAccounts.id })
+          .from(codexAccounts)
+          .where(eq(codexAccounts.companyId, companyId))
+          .orderBy(asc(codexAccounts.createdAt));
+        let hasAuthenticatedAccount = false;
+        for (const account of accountRows) {
+          if (await codexHomeHasUsableAuth(resolveCodexAccountHome(companyId, account.id))) {
+            hasAuthenticatedAccount = true;
+            break;
+          }
+        }
+        if (!hasAuthenticatedAccount) {
+          throw conflict("Authenticate at least one Codex account before enabling automatic selection");
+        }
       }
       adapterConfig.env = env;
 
       const updated = await agentsSvc.update(
         agentId,
-        { codexAccountId: accountId, adapterConfig },
+        {
+          codexAccountMode: assignment.mode,
+          codexAccountId: accountId,
+          adapterConfig,
+        },
         {
           recordRevision: {
             createdByAgentId: actor.agentId ?? null,

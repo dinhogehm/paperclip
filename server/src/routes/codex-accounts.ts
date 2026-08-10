@@ -10,7 +10,17 @@ const createCodexAccountSchema = z.object({
 });
 
 const assignCodexAccountSchema = z.object({
-  accountId: z.string().uuid().nullable(),
+  mode: z.enum(["host", "fixed", "first_available"]).optional(),
+  accountId: z.string().uuid().nullable().optional(),
+}).transform((value) => {
+  const mode = value.mode ?? (value.accountId ? "fixed" : "host");
+  return {
+    mode,
+    accountId: mode === "fixed" ? value.accountId ?? null : null,
+  };
+}).refine((value) => value.mode !== "fixed" || value.accountId !== null, {
+  message: "A fixed Codex account requires accountId",
+  path: ["accountId"],
 });
 
 export function codexAccountRoutes(db: Db) {
@@ -81,7 +91,11 @@ export function codexAccountRoutes(db: Db) {
       const agentId = req.params.agentId as string;
       assertAccountSettingsAccess(req, companyId);
       const actor = getActorInfo(req);
-      const agent = await service.assignAgent(companyId, agentId, req.body.accountId, actor);
+      const assignment = {
+        mode: req.body.mode,
+        accountId: req.body.accountId,
+      };
+      const agent = await service.assignAgent(companyId, agentId, assignment, actor);
       await logActivity(db, {
         companyId,
         actorType: actor.actorType,
@@ -92,7 +106,10 @@ export function codexAccountRoutes(db: Db) {
         action: "codex_account.agent_assignment_updated",
         entityType: "agent",
         entityId: agentId,
-        details: { codexAccountId: req.body.accountId },
+        details: {
+          codexAccountMode: assignment.mode,
+          codexAccountId: assignment.accountId,
+        },
       });
       res.json(agent);
     },

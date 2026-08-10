@@ -1,5 +1,12 @@
 import type { AgentStatus } from "../constants.js";
 
+export type CodexAccountMode = "host" | "fixed" | "first_available";
+
+export interface CodexAccountAssignment {
+  mode: CodexAccountMode;
+  accountId: string | null;
+}
+
 export type CodexAccountLoginStatus =
   | "idle"
   | "waiting_for_user"
@@ -20,6 +27,7 @@ export interface CodexAccountAgent {
   id: string;
   name: string;
   status: AgentStatus;
+  codexAccountMode: CodexAccountMode;
   codexAccountId: string | null;
   canUseSubscriptionAccount: boolean;
   subscriptionAccountBlocker: string | null;

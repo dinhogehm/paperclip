@@ -1,5 +1,10 @@
 export { companyService } from "./companies.js";
-export { codexAccountService, resolveCodexAccountHome } from "./codex-accounts.js";
+export {
+  codexAccountService,
+  resolveCodexAccountHome,
+  resolveFirstAvailableCodexAccount,
+  selectFirstAvailableCodexAccount,
+} from "./codex-accounts.js";
 export { companyArtifactsService } from "./company-artifacts.js";
 export { companySearchService } from "./company-search.js";
 export { companySearchExtractService } from "./company-search-extract.js";

@@ -25,6 +25,7 @@ export const agents = pgTable(
     reportsTo: uuid("reports_to").references((): AnyPgColumn => agents.id),
     capabilities: text("capabilities"),
     adapterType: text("adapter_type").notNull().default("process"),
+    codexAccountMode: text("codex_account_mode").notNull().default("host"),
     codexAccountId: uuid("codex_account_id").references(() => codexAccounts.id, { onDelete: "set null" }),
     adapterConfig: jsonb("adapter_config").$type<Record<string, unknown>>().notNull().default({}),
     runtimeConfig: jsonb("runtime_config").$type<Record<string, unknown>>().notNull().default({}),

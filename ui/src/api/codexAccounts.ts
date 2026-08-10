@@ -1,5 +1,6 @@
 import type {
   Agent,
+  CodexAccountAssignment,
   CodexAccountLoginState,
   CodexAccountsOverview,
 } from "@paperclipai/shared";
@@ -18,10 +19,10 @@ export const codexAccountsApi = {
       `${basePath(companyId)}/${encodeURIComponent(accountId)}/login`,
       {},
     ),
-  assignAgent: (companyId: string, agentId: string, accountId: string | null) =>
+  assignAgent: (companyId: string, agentId: string, assignment: CodexAccountAssignment) =>
     api.put<Agent>(
       `${basePath(companyId)}/agents/${encodeURIComponent(agentId)}`,
-      { accountId },
+      assignment,
     ),
   remove: (companyId: string, accountId: string) =>
     api.delete<void>(`${basePath(companyId)}/${encodeURIComponent(accountId)}`),

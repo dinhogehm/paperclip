@@ -113,6 +113,7 @@ describe("CompanyCodexAccounts", () => {
           id: "agent-1",
           name: "Engenheiro de Entrega",
           status: "idle",
+          codexAccountMode: "fixed",
           codexAccountId: "account-1",
           canUseSubscriptionAccount: true,
           subscriptionAccountBlocker: null,
@@ -157,6 +158,9 @@ describe("CompanyCodexAccounts", () => {
     expect(Array.from(assignment?.options ?? []).map((option) => option.textContent)).toContain(
       "Pro principal",
     );
+    expect(Array.from(assignment?.options ?? []).map((option) => option.textContent)).toContain(
+      "First available account (automatic)",
+    );
     expect(Array.from(assignment?.options ?? []).map((option) => option.textContent)).not.toContain(
       "Pro secundária",
     );
@@ -168,6 +172,17 @@ describe("CompanyCodexAccounts", () => {
       authenticate?.click();
     });
     await waitFor(() => expect(mockApi.startLogin).toHaveBeenCalledWith("company-1", "account-1"));
+
+    await act(async () => {
+      if (!assignment) return;
+      assignment.value = "__first_available__";
+      assignment.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await waitFor(() => expect(mockApi.assignAgent).toHaveBeenCalledWith(
+      "company-1",
+      "agent-1",
+      { mode: "first_available", accountId: null },
+    ));
 
     await act(async () => root.unmount());
   });
