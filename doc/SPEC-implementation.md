@@ -193,6 +193,12 @@ within a company, deletion cascades from the company, and deleting an account
 clears fixed agent assignments. Automatic selection remains enabled and resolves
 from the authenticated accounts that still exist.
 
+The company Codex accounts overview reports live provider usage for each
+authenticated profile. It includes every available quota window, percent used,
+the provider-reported reset timestamp, fetch time, and a non-sensitive
+availability state. Quota probe failures must remain visible but non-fatal and
+must never expose credentials or raw provider diagnostics.
+
 ## 7.3 `agent_api_keys`
 
 - `id` uuid pk

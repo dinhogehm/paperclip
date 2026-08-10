@@ -218,6 +218,16 @@ export function secondsToWindowLabel(
   return `${Math.round(hours / 24)}d`;
 }
 
+export function codexQuotaWindowLabel(
+  seconds: number | null | undefined,
+  fallback: "5h" | "7d",
+): string {
+  const duration = secondsToWindowLabel(seconds, fallback);
+  if (duration === "24h") return "Daily limit";
+  if (duration === "7d") return "Weekly limit";
+  return `${duration} limit`;
+}
+
 /** fetch with an abort-based timeout so a hanging provider api doesn't block the response indefinitely */
 export async function fetchWithTimeout(
   url: string,
@@ -302,7 +312,7 @@ export async function fetchCodexQuota(
   if (rateLimit?.primary_window != null) {
     const w = rateLimit.primary_window;
     windows.push({
-      label: "5h limit",
+      label: codexQuotaWindowLabel(w.limit_window_seconds, "5h"),
       usedPercent: normalizeCodexUsedPercent(w.used_percent),
       resetsAt:
         typeof w.reset_at === "number"
@@ -315,7 +325,7 @@ export async function fetchCodexQuota(
   if (rateLimit?.secondary_window != null) {
     const w = rateLimit.secondary_window;
     windows.push({
-      label: "Weekly limit",
+      label: codexQuotaWindowLabel(w.limit_window_seconds, "7d"),
       usedPercent: normalizeCodexUsedPercent(w.used_percent),
       resetsAt:
         typeof w.reset_at === "number"
@@ -385,10 +395,17 @@ function unixSecondsToIso(value: number | null | undefined): string | null {
   return new Date(value * 1000).toISOString();
 }
 
-function buildCodexRpcWindow(label: string, window: CodexRpcWindow | null | undefined): QuotaWindow | null {
+function buildCodexRpcWindow(
+  prefix: string,
+  fallback: "5h" | "7d",
+  window: CodexRpcWindow | null | undefined,
+): QuotaWindow | null {
   if (!window) return null;
   return {
-    label,
+    label: `${prefix}${codexQuotaWindowLabel(
+      window.windowDurationMins == null ? null : window.windowDurationMins * 60,
+      fallback,
+    )}`,
     usedPercent: normalizeCodexUsedPercent(window.usedPercent),
     resetsAt: unixSecondsToIso(window.resetsAt),
     valueLabel: null,
@@ -433,9 +450,9 @@ export function mapCodexRpcQuota(result: CodexRpcRateLimitsResult, account?: Cod
       limitId === "codex"
         ? ""
         : `${limit.limitName ?? limitId} · `;
-    const primary = buildCodexRpcWindow(`${prefix}5h limit`, limit.primary);
+    const primary = buildCodexRpcWindow(prefix, "5h", limit.primary);
     if (primary) windows.push(primary);
-    const secondary = buildCodexRpcWindow(`${prefix}Weekly limit`, limit.secondary);
+    const secondary = buildCodexRpcWindow(prefix, "7d", limit.secondary);
     if (secondary) windows.push(secondary);
     if (limitId === "codex" && limit.credits && limit.credits.unlimited !== true) {
       windows.push({

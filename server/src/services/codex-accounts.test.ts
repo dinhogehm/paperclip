@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  loadCodexAccountQuota,
   parseCodexDevicePrompt,
   resolveCodexLoginCommand,
   selectFirstAvailableCodexAccount,
@@ -77,5 +78,59 @@ describe("Codex account device login", () => {
       accountName: "Secondary",
       quotaState: "available",
     });
+  });
+
+  it("reports live usage windows and their reset timestamps without exposing credentials", async () => {
+    const quota = await loadCodexAccountQuota({
+      accessToken: "private-access-token",
+      providerAccountId: "chatgpt-account",
+      now: () => new Date("2026-08-10T20:00:00.000Z"),
+      fetchQuota: async () => [
+        {
+          label: "5h limit",
+          usedPercent: 28,
+          resetsAt: "2026-08-10T22:30:00.000Z",
+          valueLabel: null,
+          detail: null,
+        },
+        {
+          label: "Weekly limit",
+          usedPercent: 64,
+          resetsAt: "2026-08-14T12:00:00.000Z",
+          valueLabel: null,
+          detail: null,
+        },
+      ],
+    });
+
+    expect(quota).toEqual({
+      status: "available",
+      fetchedAt: "2026-08-10T20:00:00.000Z",
+      error: null,
+      windows: [
+        expect.objectContaining({ label: "5h limit", usedPercent: 28 }),
+        expect.objectContaining({ label: "Weekly limit", usedPercent: 64 }),
+      ],
+    });
+    expect(JSON.stringify(quota)).not.toContain("private-access-token");
+  });
+
+  it("turns quota probe failures into a retryable display state", async () => {
+    const quota = await loadCodexAccountQuota({
+      accessToken: "private-access-token",
+      providerAccountId: "chatgpt-account",
+      now: () => new Date("2026-08-10T20:00:00.000Z"),
+      fetchQuota: async () => {
+        throw new Error("provider response containing sensitive diagnostics");
+      },
+    });
+
+    expect(quota).toEqual({
+      status: "unknown",
+      windows: [],
+      fetchedAt: "2026-08-10T20:00:00.000Z",
+      error: "Usage data is temporarily unavailable. Paperclip will try again automatically.",
+    });
+    expect(JSON.stringify(quota)).not.toContain("sensitive diagnostics");
   });
 });
