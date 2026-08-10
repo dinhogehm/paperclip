@@ -13,6 +13,7 @@ import { privateHostnameGuard, resolvePrivateHostnameAllowSet } from "./middlewa
 import { applyTrustProxy, parseTrustProxyEnv } from "./middleware/trust-proxy.js";
 import { healthRoutes } from "./routes/health.js";
 import { companyRoutes } from "./routes/companies.js";
+import { codexAccountRoutes } from "./routes/codex-accounts.js";
 import { companySkillRoutes } from "./routes/company-skills.js";
 import { companySkillPolicyRoutes } from "./routes/company-skill-policy.js";
 import { inboxAgentPolicyRoutes } from "./routes/inbox-agent-policy.js";
@@ -238,6 +239,7 @@ export async function createApp(
   );
   api.use(openApiRoutes());
   api.use("/companies", companyRoutes(db, opts.storageService));
+  api.use(codexAccountRoutes(db));
   api.use(llmRoutes(db));
   api.use(folderRoutes(db));
   api.use(companySkillRoutes(db));

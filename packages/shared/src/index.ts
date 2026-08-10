@@ -64,6 +64,13 @@ export type {
   AttentionWorkspaceRef,
 } from "./types/attention.js";
 export type {
+  CodexAccount,
+  CodexAccountAgent,
+  CodexAccountLoginState,
+  CodexAccountLoginStatus,
+  CodexAccountsOverview,
+} from "./types/codex-account.js";
+export type {
   DecisionTrainingExample,
   DecisionTrainingNotesHistoryEntry,
   DecisionTrainingPreview,

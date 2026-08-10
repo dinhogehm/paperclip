@@ -6,6 +6,7 @@ import { useLocation, useNavigate } from "@/lib/router";
 const items = [
   { value: "general", label: "General", href: "/company/settings" },
   { value: "cloud-upstream", label: "Cloud upstream", href: "/company/settings/cloud-upstream" },
+  { value: "codex-accounts", label: "Codex accounts", href: "/company/settings/codex-accounts" },
   { value: "members", label: "Members", href: "/company/settings/members" },
   { value: "invites", label: "Invites", href: "/company/settings/invites" },
   { value: "secrets", label: "Secrets", href: "/company/settings/secrets" },
@@ -60,6 +61,10 @@ export function getCompanySettingsTab(pathname: string): CompanySettingsTab {
 
   if (pathname.includes("/company/settings/cloud-upstream")) {
     return "cloud-upstream";
+  }
+
+  if (pathname.includes("/company/settings/codex-accounts")) {
+    return "codex-accounts";
   }
 
   if (pathname.includes("/company/settings/members") || pathname.includes("/company/settings/access")) {

@@ -6,6 +6,7 @@ import {
   Cpu,
   FlaskConical,
   KeyRound,
+  CircleUserRound,
   MailPlus,
   MonitorCog,
   Puzzle,
@@ -113,6 +114,12 @@ export function CompanySettingsSidebar() {
               end
             />
           ) : null}
+          <SidebarNavItem
+            to="/company/settings/codex-accounts"
+            label="Codex accounts"
+            icon={CircleUserRound}
+            end
+          />
           <SidebarNavItem
             to="/company/settings/members"
             label="Members"
