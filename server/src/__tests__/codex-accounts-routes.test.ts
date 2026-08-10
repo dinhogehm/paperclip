@@ -58,7 +58,11 @@ describe("Codex account routes", () => {
       expiresAt: "2026-08-10T12:15:00.000Z",
       error: null,
     });
-    mockService.assignAgent.mockResolvedValue({ id: agentId, codexAccountId: accountId });
+    mockService.assignAgent.mockResolvedValue({
+      id: agentId,
+      codexAccountMode: "fixed",
+      codexAccountId: accountId,
+    });
     mockService.remove.mockResolvedValue(undefined);
   });
 
@@ -93,13 +97,13 @@ describe("Codex account routes", () => {
   it("updates an agent assignment and audits only the account identifier", async () => {
     await request(buildApp(localBoardActor()))
       .put(`/api/companies/${companyId}/codex-accounts/agents/${agentId}`)
-      .send({ accountId })
+      .send({ mode: "fixed", accountId })
       .expect(200);
 
     expect(mockService.assignAgent).toHaveBeenCalledWith(
       companyId,
       agentId,
-      accountId,
+      { mode: "fixed", accountId },
       expect.objectContaining({ actorType: "user" }),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
@@ -107,8 +111,22 @@ describe("Codex account routes", () => {
       expect.objectContaining({
         action: "codex_account.agent_assignment_updated",
         entityId: agentId,
-        details: { codexAccountId: accountId },
+        details: { codexAccountMode: "fixed", codexAccountId: accountId },
       }),
+    );
+  });
+
+  it("accepts quota-aware first-available account selection", async () => {
+    await request(buildApp(localBoardActor()))
+      .put(`/api/companies/${companyId}/codex-accounts/agents/${agentId}`)
+      .send({ mode: "first_available", accountId: null })
+      .expect(200);
+
+    expect(mockService.assignAgent).toHaveBeenCalledWith(
+      companyId,
+      agentId,
+      { mode: "first_available", accountId: null },
+      expect.objectContaining({ actorType: "user" }),
     );
   });
 

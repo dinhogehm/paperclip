@@ -11,12 +11,14 @@ import {
   Plus,
   Trash2,
 } from "lucide-react";
-import type { CodexAccount } from "@paperclipai/shared";
+import type { CodexAccount, CodexAccountAssignment } from "@paperclipai/shared";
 import { codexAccountsApi } from "@/api/codexAccounts";
 import { Button } from "@/components/ui/button";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useCompany } from "@/context/CompanyContext";
 import { queryKeys } from "@/lib/queryKeys";
+
+const FIRST_AVAILABLE_VALUE = "__first_available__";
 
 function accountStatusLabel(account: CodexAccount) {
   if (account.authenticated) return "Authenticated";
@@ -81,8 +83,13 @@ export function CompanyCodexAccounts() {
   });
 
   const assignmentMutation = useMutation({
-    mutationFn: ({ agentId, accountId }: { agentId: string; accountId: string | null }) =>
-      codexAccountsApi.assignAgent(selectedCompanyId!, agentId, accountId),
+    mutationFn: ({
+      agentId,
+      assignment,
+    }: {
+      agentId: string;
+      assignment: CodexAccountAssignment;
+    }) => codexAccountsApi.assignAgent(selectedCompanyId!, agentId, assignment),
     onSuccess: invalidateAccounts,
   });
 
@@ -283,7 +290,7 @@ export function CompanyCodexAccounts() {
             Agent assignments
           </h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            Agents assigned to different accounts can run concurrently with isolated sessions.
+            Choose a fixed isolated account, the shared host session, or automatic quota-aware selection.
           </p>
         </div>
         <div className="divide-y divide-border rounded-md border border-border">
@@ -303,17 +310,29 @@ export function CompanyCodexAccounts() {
                 </div>
                 <select
                   aria-label={`Codex account for ${agent.name}`}
-                  className="rounded-md border border-border bg-background px-2.5 py-1.5 text-sm outline-none sm:w-56"
-                  value={agent.codexAccountId ?? ""}
+                  className="rounded-md border border-border bg-background px-2.5 py-1.5 text-sm outline-none sm:w-72"
+                  value={
+                    agent.codexAccountMode === "first_available"
+                      ? FIRST_AVAILABLE_VALUE
+                      : agent.codexAccountMode === "fixed"
+                        ? agent.codexAccountId ?? ""
+                        : ""
+                  }
                   disabled={!agent.canUseSubscriptionAccount || assignmentMutation.isPending}
                   onChange={(event) => {
+                    const value = event.target.value;
                     assignmentMutation.mutate({
                       agentId: agent.id,
-                      accountId: event.target.value || null,
+                      assignment: value === FIRST_AVAILABLE_VALUE
+                        ? { mode: "first_available", accountId: null }
+                        : value
+                          ? { mode: "fixed", accountId: value }
+                          : { mode: "host", accountId: null },
                     });
                   }}
                 >
-                  <option value="">Host account (shared)</option>
+                  <option value="">Host account (shared session)</option>
+                  <option value={FIRST_AVAILABLE_VALUE}>First available account (automatic)</option>
                   {authenticatedAccounts.map((account) => (
                     <option key={account.id} value={account.id}>{account.name}</option>
                   ))}

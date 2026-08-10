@@ -244,6 +244,7 @@ import {
 import { extractSkillMentionIds, isUuidLike } from "@paperclipai/shared";
 import { evaluateCodexCredentialReadiness } from "@paperclipai/adapter-codex-local/server";
 import { environmentService } from "./environments.js";
+import { resolveFirstAvailableCodexAccount } from "./codex-accounts.js";
 import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.js";
 import { environmentRuntimeService } from "./environment-runtime.js";
 import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
@@ -12262,7 +12263,44 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueAdapterConfig: issueAssigneeOverrides?.adapterConfig ?? null,
     });
     const configSnapshot = buildExecutionWorkspaceConfigSnapshot(mergedConfig, selectedEnvironmentId);
-    const executionRunConfig = stripWorkspaceRuntimeFromExecutionRunConfig(mergedConfig);
+    let executionRunConfig = stripWorkspaceRuntimeFromExecutionRunConfig(mergedConfig);
+    if (agent.adapterType === "codex_local" && agent.codexAccountMode === "first_available") {
+      const selection = await resolveFirstAvailableCodexAccount(db, agent.companyId);
+      if (!selection) {
+        throw new ConfigurationIncompleteFailure(
+          "configuration incomplete: automatic Codex account selection requires at least one authenticated account.",
+          {
+            configurationIncomplete: {
+              reason: "codex_account_unavailable",
+              companyId: agent.companyId,
+              agentId: agent.id,
+              issueId: issueId ?? null,
+              adapterType: "codex_local",
+              missingBindings: [],
+            },
+          },
+        );
+      }
+      executionRunConfig = {
+        ...executionRunConfig,
+        env: {
+          ...parseObject(executionRunConfig.env),
+          CODEX_HOME: selection.codexHome,
+        },
+      };
+      context.paperclipCodexAccount = {
+        mode: "first_available",
+        accountId: selection.accountId,
+        accountName: selection.accountName,
+        quotaState: selection.quotaState,
+      };
+      await db
+        .update(heartbeatRuns)
+        .set({ contextSnapshot: context, updatedAt: new Date() })
+        .where(eq(heartbeatRuns.id, run.id));
+    } else {
+      delete context.paperclipCodexAccount;
+    }
     const selectedEnvironmentForConfig = selectedEnvironmentId === localEnvironment.id
       ? localEnvironment
       : selectedEnvironmentId

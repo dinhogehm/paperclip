@@ -66,8 +66,10 @@ export type {
 export type {
   CodexAccount,
   CodexAccountAgent,
+  CodexAccountAssignment,
   CodexAccountLoginState,
   CodexAccountLoginStatus,
+  CodexAccountMode,
   CodexAccountsOverview,
 } from "./types/codex-account.js";
 export type {
