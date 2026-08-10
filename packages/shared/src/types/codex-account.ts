@@ -33,6 +33,27 @@ export interface CodexAccountAgent {
   subscriptionAccountBlocker: string | null;
 }
 
+export type CodexAccountQuotaStatus =
+  | "available"
+  | "exhausted"
+  | "unknown"
+  | "unauthenticated";
+
+export interface CodexAccountQuotaWindow {
+  label: string;
+  usedPercent: number | null;
+  resetsAt: string | null;
+  valueLabel: string | null;
+  detail: string | null;
+}
+
+export interface CodexAccountQuota {
+  status: CodexAccountQuotaStatus;
+  windows: CodexAccountQuotaWindow[];
+  fetchedAt: string | null;
+  error: string | null;
+}
+
 export interface CodexAccount {
   id: string;
   companyId: string;
@@ -43,6 +64,7 @@ export interface CodexAccount {
   lastRefresh: string | null;
   lastAuthenticatedAt: string | null;
   assignedAgentIds: string[];
+  quota: CodexAccountQuota;
   login: CodexAccountLoginState;
   createdAt: string;
   updatedAt: string;

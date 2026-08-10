@@ -17,7 +17,7 @@ vi.mock("node:child_process", async (importOriginal) => {
   };
 });
 
-import { fetchCodexQuota, getQuotaWindows } from "./quota.js";
+import { fetchCodexQuota, getQuotaWindows, mapCodexRpcQuota } from "./quota.js";
 
 function createChildThatErrorsOnMicrotask(err: Error): ChildProcess {
   const child = new EventEmitter() as ChildProcess;
@@ -95,7 +95,11 @@ describe("CodexRpcClient spawn failures", () => {
       vi.fn(async () => new Response(
         JSON.stringify({
           rate_limit: {
-            primary_window: { used_percent: 0.5, reset_at: 1_711_111_111 },
+            primary_window: {
+              used_percent: 0.5,
+              limit_window_seconds: 604_800,
+              reset_at: 1_711_111_111,
+            },
           },
         }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -109,10 +113,25 @@ describe("CodexRpcClient spawn failures", () => {
     expect(result.errorFamily).toBeUndefined();
     expect(result.windows).toEqual([
       expect.objectContaining({
-        label: "5h limit",
+        label: "Weekly limit",
         usedPercent: 50,
         resetsAt: "2024-03-22T12:38:31.000Z",
       }),
+    ]);
+  });
+
+  it("labels RPC quota windows from the provider-reported duration", () => {
+    const result = mapCodexRpcQuota({
+      rateLimits: {
+        limitId: "codex",
+        primary: { usedPercent: 25, windowDurationMins: 1_440, resetsAt: 1_711_111_111 },
+        secondary: { usedPercent: 50, windowDurationMins: 10_080, resetsAt: 1_711_222_222 },
+      },
+    });
+
+    expect(result.windows).toEqual([
+      expect.objectContaining({ label: "Daily limit", usedPercent: 25 }),
+      expect.objectContaining({ label: "Weekly limit", usedPercent: 50 }),
     ]);
   });
 

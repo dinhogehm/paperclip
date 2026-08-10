@@ -9,6 +9,8 @@ import type {
   CodexAccountAssignment,
   CodexAccountLoginState,
   CodexAccountMode,
+  CodexAccountQuota,
+  CodexAccountQuotaWindow,
   CodexAccountsOverview,
 } from "@paperclipai/shared";
 import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
@@ -236,6 +238,66 @@ export async function resolveFirstAvailableCodexAccount(
   return selectFirstAvailableCodexAccount({ accounts: accountRows });
 }
 
+type CodexQuotaFetcher = (
+  token: string,
+  accountId: string | null,
+) => Promise<CodexAccountQuotaWindow[]>;
+
+export async function loadCodexAccountQuota(input: {
+  accessToken: string | null;
+  providerAccountId: string | null;
+  fetchQuota?: CodexQuotaFetcher;
+  now?: () => Date;
+}): Promise<CodexAccountQuota> {
+  if (!input.accessToken) {
+    return {
+      status: "unauthenticated",
+      windows: [],
+      fetchedAt: null,
+      error: null,
+    };
+  }
+
+  const fetchedAt = (input.now ?? (() => new Date()))().toISOString();
+  try {
+    const windows = await (input.fetchQuota ?? fetchCodexQuota)(
+      input.accessToken,
+      input.providerAccountId,
+    );
+    if (windows.length === 0) {
+      return {
+        status: "unknown",
+        windows: [],
+        fetchedAt,
+        error: "OpenAI did not report usage windows for this account.",
+      };
+    }
+    return {
+      status: windows.some(
+        (window) => window.usedPercent != null && window.usedPercent >= 100,
+      )
+        ? "exhausted"
+        : "available",
+      windows: windows.map((window) => ({
+        label: window.label,
+        usedPercent: window.usedPercent,
+        resetsAt: window.resetsAt,
+        valueLabel: window.valueLabel,
+        detail: window.detail ?? null,
+      })),
+      fetchedAt,
+      error: null,
+    };
+  } catch {
+    return {
+      status: "unknown",
+      windows: [],
+      fetchedAt,
+      error: "Usage data is temporarily unavailable. Paperclip will try again automatically.",
+    };
+  }
+}
+
 function normalizeCodexAccountMode(value: string): CodexAccountMode {
   return value === "fixed" || value === "first_available" ? value : "host";
 }
@@ -354,6 +416,10 @@ export function codexAccountService(db: Db) {
 
       const accountSummaries = await Promise.all(accountRows.map(async (account) => {
         const auth = await readCodexAuthInfo(resolveCodexAccountHome(companyId, account.id));
+        const quota = await loadCodexAccountQuota({
+          accessToken: auth?.accessToken ?? null,
+          providerAccountId: auth?.accountId ?? null,
+        });
         const loginSession = loginSessions.get(account.id);
         const login = publicLoginState(loginSession);
         if (auth && login.status === "idle") login.status = "authenticated";
@@ -369,6 +435,7 @@ export function codexAccountService(db: Db) {
           assignedAgentIds: agentRows
             .filter((agent) => agent.codexAccountId === account.id)
             .map((agent) => agent.id),
+          quota,
           login,
           createdAt: account.createdAt.toISOString(),
           updatedAt: account.updatedAt.toISOString(),

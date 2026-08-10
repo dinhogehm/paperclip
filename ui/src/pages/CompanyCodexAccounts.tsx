@@ -9,14 +9,20 @@ import {
   KeyRound,
   Loader2,
   Plus,
+  RefreshCw,
   Trash2,
 } from "lucide-react";
-import type { CodexAccount, CodexAccountAssignment } from "@paperclipai/shared";
+import type {
+  CodexAccount,
+  CodexAccountAssignment,
+  CodexAccountQuotaWindow,
+} from "@paperclipai/shared";
 import { codexAccountsApi } from "@/api/codexAccounts";
 import { Button } from "@/components/ui/button";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useCompany } from "@/context/CompanyContext";
 import { queryKeys } from "@/lib/queryKeys";
+import { formatDateTime } from "@/lib/utils";
 
 const FIRST_AVAILABLE_VALUE = "__first_available__";
 
@@ -31,6 +37,78 @@ function accountStatusLabel(account: CodexAccount) {
 function accountIdentity(account: CodexAccount) {
   if (account.email && account.planType) return `${account.email} · ${account.planType}`;
   return account.email ?? account.planType ?? "ChatGPT subscription";
+}
+
+function clampPercent(value: number) {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function formatResetCountdown(resetsAt: string, now = Date.now()) {
+  const resetTime = new Date(resetsAt).getTime();
+  if (!Number.isFinite(resetTime)) return null;
+  const minutes = Math.max(0, Math.ceil((resetTime - now) / 60_000));
+  if (minutes === 0) return "due now";
+  if (minutes < 60) return `in ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 24) return `in ${hours}h${remainingMinutes ? ` ${remainingMinutes}m` : ""}`;
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  return `in ${days}d${remainingHours ? ` ${remainingHours}h` : ""}`;
+}
+
+function quotaStatusLabel(account: CodexAccount) {
+  if (account.quota.status === "available") return "Available now";
+  if (account.quota.status === "exhausted") return "Limit reached";
+  if (account.quota.status === "unauthenticated") return "Sign in to view usage";
+  return "Availability unknown";
+}
+
+function QuotaWindow({ window }: { window: CodexAccountQuotaWindow }) {
+  const usedPercent = window.usedPercent == null ? null : clampPercent(window.usedPercent);
+  const availablePercent = usedPercent == null ? null : 100 - usedPercent;
+  const resetCountdown = window.resetsAt ? formatResetCountdown(window.resetsAt) : null;
+
+  return (
+    <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+        <span className="font-medium">{window.label}</span>
+        <span className="font-mono text-muted-foreground">
+          {availablePercent == null
+            ? window.valueLabel ?? "Usage not reported"
+            : `${availablePercent}% available`}
+        </span>
+      </div>
+      {usedPercent == null ? null : (
+        <>
+          <div
+            className="h-2 overflow-hidden rounded-full bg-muted"
+            role="progressbar"
+            aria-label={`${window.label} usage`}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={usedPercent}
+          >
+            <div
+              className={`h-full rounded-full ${usedPercent >= 100 ? "bg-destructive" : "bg-primary"}`}
+              style={{ width: `${usedPercent}%` }}
+            />
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+            <span className="font-mono">{usedPercent}% used</span>
+            {window.resetsAt ? (
+              <time dateTime={window.resetsAt} title={formatDateTime(window.resetsAt)}>
+                Resets {formatDateTime(window.resetsAt)}{resetCountdown ? ` · ${resetCountdown}` : ""}
+              </time>
+            ) : (
+              <span>Reset time not reported</span>
+            )}
+          </div>
+        </>
+      )}
+      {window.detail ? <p className="text-xs text-muted-foreground">{window.detail}</p> : null}
+    </div>
+  );
 }
 
 export function CompanyCodexAccounts() {
@@ -57,7 +135,7 @@ export function CompanyCodexAccounts() {
     refetchInterval: (query) =>
       query.state.data?.accounts.some((account) => account.login.status === "waiting_for_user")
         ? 2_000
-        : false,
+        : 60_000,
   });
 
   const invalidateAccounts = async () => {
@@ -163,13 +241,29 @@ export function CompanyCodexAccounts() {
       </section>
 
       <section className="space-y-3" aria-labelledby="authenticated-accounts-heading">
-        <div className="flex items-center justify-between gap-3">
-          <h2 id="authenticated-accounts-heading" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Accounts
-          </h2>
-          <span className="text-xs text-muted-foreground">
-            {authenticatedAccounts.length} authenticated
-          </span>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 id="authenticated-accounts-heading" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Accounts
+            </h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Shows every rolling window currently reported by OpenAI. Usage refreshes every minute.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">
+              {authenticatedAccounts.length} authenticated
+            </span>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => void accountsQuery.refetch()}
+              disabled={accountsQuery.isFetching}
+            >
+              <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${accountsQuery.isFetching ? "animate-spin" : ""}`} />
+              Refresh usage
+            </Button>
+          </div>
         </div>
 
         {accountsQuery.isPending ? (
@@ -238,6 +332,34 @@ export function CompanyCodexAccounts() {
                       </Button>
                     </div>
                   </div>
+
+                  {account.authenticated ? (
+                    <div className="mt-4 space-y-3 border-t border-border pt-3" aria-label={`Usage limits for ${account.name}`}>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className={`text-xs font-medium ${account.quota.status === "exhausted" ? "text-destructive" : "text-foreground"}`}>
+                          {quotaStatusLabel(account)}
+                        </p>
+                        {account.quota.fetchedAt ? (
+                          <time
+                            className="font-mono text-xs text-muted-foreground"
+                            dateTime={account.quota.fetchedAt}
+                            title={formatDateTime(account.quota.fetchedAt)}
+                          >
+                            Updated {formatDateTime(account.quota.fetchedAt)}
+                          </time>
+                        ) : null}
+                      </div>
+                      {account.quota.windows.length > 0 ? (
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {account.quota.windows.map((window) => (
+                            <QuotaWindow key={`${window.label}-${window.resetsAt ?? "no-reset"}`} window={window} />
+                          ))}
+                        </div>
+                      ) : account.quota.error ? (
+                        <p className="text-xs text-muted-foreground">{account.quota.error}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   {waiting && account.login.userCode && account.login.verificationUrl ? (
                     <div className="mt-4 rounded-md border border-border bg-muted/40 p-3">

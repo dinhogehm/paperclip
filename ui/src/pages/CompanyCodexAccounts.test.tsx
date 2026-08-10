@@ -75,6 +75,27 @@ describe("CompanyCodexAccounts", () => {
           lastRefresh: "2026-08-10T10:00:00.000Z",
           lastAuthenticatedAt: "2026-08-10T10:00:00.000Z",
           assignedAgentIds: ["agent-1"],
+          quota: {
+            status: "available",
+            fetchedAt: "2026-08-10T20:00:00.000Z",
+            error: null,
+            windows: [
+              {
+                label: "5h limit",
+                usedPercent: 28,
+                resetsAt: "2026-08-10T22:30:00.000Z",
+                valueLabel: null,
+                detail: null,
+              },
+              {
+                label: "Weekly limit",
+                usedPercent: 64,
+                resetsAt: "2026-08-14T12:00:00.000Z",
+                valueLabel: null,
+                detail: null,
+              },
+            ],
+          },
           login: {
             status: "authenticated",
             verificationUrl: null,
@@ -96,6 +117,12 @@ describe("CompanyCodexAccounts", () => {
           lastRefresh: null,
           lastAuthenticatedAt: null,
           assignedAgentIds: [],
+          quota: {
+            status: "unauthenticated",
+            fetchedAt: null,
+            error: null,
+            windows: [],
+          },
           login: {
             status: "waiting_for_user",
             verificationUrl: "https://auth.openai.com/codex/device",
@@ -150,6 +177,11 @@ describe("CompanyCodexAccounts", () => {
     await waitFor(() => expect(container.textContent).toContain("owner@example.com · pro"));
 
     expect(container.textContent).toContain("ABCD-EFGH");
+    expect(container.textContent).toContain("72% available");
+    expect(container.textContent).toContain("28% used");
+    expect(container.textContent).toContain("36% available");
+    expect(container.textContent).toContain("Weekly limit");
+    expect(container.querySelector('time[datetime="2026-08-10T22:30:00.000Z"]')).not.toBeNull();
     expect(container.querySelector('a[href="https://auth.openai.com/codex/device"]')).not.toBeNull();
     const assignment = container.querySelector(
       'select[aria-label="Codex account for Engenheiro de Entrega"]',

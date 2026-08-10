@@ -255,6 +255,9 @@ export type {
   CodexAccountLoginState,
   CodexAccountLoginStatus,
   CodexAccountMode,
+  CodexAccountQuota,
+  CodexAccountQuotaStatus,
+  CodexAccountQuotaWindow,
   CodexAccountsOverview,
 } from "./codex-account.js";
 export type {

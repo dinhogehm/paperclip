@@ -34,6 +34,7 @@ export {
   fetchCodexRpcQuota,
   mapCodexRpcQuota,
   secondsToWindowLabel,
+  codexQuotaWindowLabel,
   fetchWithTimeout,
   codexHomeDir,
 } from "./quota.js";
