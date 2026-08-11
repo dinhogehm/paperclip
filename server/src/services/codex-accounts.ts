@@ -2,9 +2,9 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { and, asc, eq, ne } from "drizzle-orm";
+import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, codexAccounts } from "@paperclipai/db";
+import { agents, codexAccounts, heartbeatRuns } from "@paperclipai/db";
 import type {
   CodexAccountAssignment,
   CodexAccountLoginState,
@@ -180,13 +180,14 @@ export interface FirstAvailableCodexAccountSelection {
 
 export async function selectFirstAvailableCodexAccount(input: {
   accounts: AutoSelectableCodexAccount[];
+  busyAccountIds?: Iterable<string>;
   readAuthInfo?: typeof readCodexAuthInfo;
   fetchQuota?: typeof fetchCodexQuota;
 }): Promise<FirstAvailableCodexAccountSelection | null> {
   const readAuthInfo = input.readAuthInfo ?? readCodexAuthInfo;
   const fetchQuota = input.fetchQuota ?? fetchCodexQuota;
-  let quotaUnknownFallback: FirstAvailableCodexAccountSelection | null = null;
-  let exhaustedFallback: FirstAvailableCodexAccountSelection | null = null;
+  const busyAccountIds = new Set(input.busyAccountIds ?? []);
+  const selections: Array<FirstAvailableCodexAccountSelection & { busy: boolean }> = [];
 
   for (const account of input.accounts) {
     const codexHome = resolveCodexAccountHome(account.companyId, account.id);
@@ -198,44 +199,82 @@ export async function selectFirstAvailableCodexAccount(input: {
       const exhausted = windows.some(
         (window) => window.usedPercent != null && window.usedPercent >= 100,
       );
-      const selection: FirstAvailableCodexAccountSelection = {
+      selections.push({
         accountId: account.id,
         accountName: account.name,
         codexHome,
         quotaState: exhausted ? "exhausted_fallback" : "available",
-      };
-      if (!exhausted) return selection;
-      exhaustedFallback ??= selection;
+        busy: busyAccountIds.has(account.id),
+      });
     } catch {
-      quotaUnknownFallback ??= {
+      selections.push({
         accountId: account.id,
         accountName: account.name,
         codexHome,
         quotaState: "unknown",
-      };
+        busy: busyAccountIds.has(account.id),
+      });
     }
   }
 
-  // A transient quota-probe outage must not stop the delivery queue. If every
-  // authenticated account is exhausted, let the adapter's provider-quota
-  // classification schedule the existing reset-aware retry.
-  return quotaUnknownFallback ?? exhaustedFallback;
+  // Prefer a profile that both has quota and is not already running another
+  // heartbeat. This turns "first available" into an actual shared pool: two
+  // concurrently active agents no longer pile onto the first authenticated
+  // account while another account sits idle. Busy accounts remain fallbacks so
+  // a company with fewer accounts than workers can still make progress.
+  const preference: Array<[FirstAvailableCodexAccountSelection["quotaState"], boolean]> = [
+    ["available", false],
+    ["unknown", false],
+    ["available", true],
+    ["unknown", true],
+    ["exhausted_fallback", false],
+    ["exhausted_fallback", true],
+  ];
+  for (const [quotaState, busy] of preference) {
+    const selection = selections.find(
+      (candidate) => candidate.quotaState === quotaState && candidate.busy === busy,
+    );
+    if (selection) {
+      return {
+        accountId: selection.accountId,
+        accountName: selection.accountName,
+        codexHome: selection.codexHome,
+        quotaState: selection.quotaState,
+      };
+    }
+  }
+  return null;
 }
 
 export async function resolveFirstAvailableCodexAccount(
   db: Db,
   companyId: string,
 ): Promise<FirstAvailableCodexAccountSelection | null> {
-  const accountRows = await db
-    .select({
-      id: codexAccounts.id,
-      companyId: codexAccounts.companyId,
-      name: codexAccounts.name,
-    })
-    .from(codexAccounts)
-    .where(eq(codexAccounts.companyId, companyId))
-    .orderBy(asc(codexAccounts.createdAt));
-  return selectFirstAvailableCodexAccount({ accounts: accountRows });
+  const [accountRows, busyRows] = await Promise.all([
+    db
+      .select({
+        id: codexAccounts.id,
+        companyId: codexAccounts.companyId,
+        name: codexAccounts.name,
+      })
+      .from(codexAccounts)
+      .where(eq(codexAccounts.companyId, companyId))
+      .orderBy(asc(codexAccounts.createdAt)),
+    db
+      .select({
+        accountId: sql<string | null>`${heartbeatRuns.contextSnapshot} -> 'paperclipCodexAccount' ->> 'accountId'`,
+      })
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.companyId, companyId),
+        inArray(heartbeatRuns.status, ["queued", "running"]),
+        sql`${heartbeatRuns.contextSnapshot} -> 'paperclipCodexAccount' ->> 'accountId' is not null`,
+      )),
+  ]);
+  return selectFirstAvailableCodexAccount({
+    accounts: accountRows,
+    busyAccountIds: busyRows.flatMap((row) => row.accountId ? [row.accountId] : []),
+  });
 }
 
 type CodexQuotaFetcher = (
