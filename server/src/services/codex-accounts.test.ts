@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  codexAccountIdFromRunContext,
   loadCodexAccountQuota,
   parseCodexDevicePrompt,
   resolveCodexLoginCommand,
@@ -28,6 +29,19 @@ function quotaWindow(usedPercent: number) {
 }
 
 describe("Codex account device login", () => {
+  it("reads live account reservations from object and serialized run contexts", () => {
+    const context = {
+      paperclipCodexAccount: {
+        mode: "first_available",
+        accountId: "account-2",
+      },
+    };
+
+    expect(codexAccountIdFromRunContext(context)).toBe("account-2");
+    expect(codexAccountIdFromRunContext(JSON.stringify(context))).toBe("account-2");
+    expect(codexAccountIdFromRunContext({})).toBeNull();
+  });
+
   it("serializes simultaneous account reservations for the same company", async () => {
     const order: string[] = [];
     let releaseFirst!: () => void;

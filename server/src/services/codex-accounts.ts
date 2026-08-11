@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, codexAccounts, heartbeatRuns } from "@paperclipai/db";
 import type {
@@ -179,6 +179,21 @@ export interface FirstAvailableCodexAccountSelection {
   quotaState: "available" | "unknown" | "exhausted_fallback";
 }
 
+export function codexAccountIdFromRunContext(value: unknown): string | null {
+  let snapshot = value;
+  if (typeof snapshot === "string") {
+    try {
+      snapshot = JSON.parse(snapshot);
+    } catch {
+      return null;
+    }
+  }
+  const account = asRecord(asRecord(snapshot)?.paperclipCodexAccount);
+  return typeof account?.accountId === "string" && account.accountId.trim()
+    ? account.accountId.trim()
+    : null;
+}
+
 export async function withCodexAccountSelectionLock<T>(
   companyId: string,
   task: () => Promise<T>,
@@ -288,18 +303,24 @@ export async function resolveFirstAvailableCodexAccount(
       .orderBy(asc(codexAccounts.createdAt)),
     db
       .select({
-        accountId: sql<string | null>`${heartbeatRuns.contextSnapshot} -> 'paperclipCodexAccount' ->> 'accountId'`,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
       })
       .from(heartbeatRuns)
       .where(and(
         eq(heartbeatRuns.companyId, companyId),
         inArray(heartbeatRuns.status, ["queued", "running"]),
-        sql`${heartbeatRuns.contextSnapshot} -> 'paperclipCodexAccount' ->> 'accountId' is not null`,
       )),
   ]);
   return selectFirstAvailableCodexAccount({
     accounts: accountRows,
-    busyAccountIds: busyRows.flatMap((row) => row.accountId ? [row.accountId] : []),
+    // Parse through the ORM value instead of extracting through a raw JSON SQL
+    // expression. Some embedded-postgres/driver combinations return this
+    // column serialized; the SQL path then yielded no reservations and every
+    // worker fell back to the first account.
+    busyAccountIds: busyRows.flatMap((row) => {
+      const accountId = codexAccountIdFromRunContext(row.contextSnapshot);
+      return accountId ? [accountId] : [];
+    }),
   });
 }
 
