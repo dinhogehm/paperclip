@@ -146,6 +146,24 @@ describe("Codex account device login", () => {
     });
   });
 
+  it("balances excess workers onto the least-loaded authenticated account", async () => {
+    const selection = await selectFirstAvailableCodexAccount({
+      accounts: [
+        { id: "account-1", companyId: "company-1", name: "Primary" },
+        { id: "account-2", companyId: "company-1", name: "Secondary" },
+      ],
+      busyAccountIds: ["account-1", "account-1", "account-2"],
+      readAuthInfo: async () => authenticated,
+      fetchQuota: async () => [quotaWindow(20)],
+    });
+
+    expect(selection).toMatchObject({
+      accountId: "account-2",
+      accountName: "Secondary",
+      quotaState: "available",
+    });
+  });
+
   it("reports live usage windows and their reset timestamps without exposing credentials", async () => {
     const quota = await loadCodexAccountQuota({
       accessToken: "private-access-token",

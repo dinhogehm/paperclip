@@ -210,8 +210,11 @@ export async function selectFirstAvailableCodexAccount(input: {
 }): Promise<FirstAvailableCodexAccountSelection | null> {
   const readAuthInfo = input.readAuthInfo ?? readCodexAuthInfo;
   const fetchQuota = input.fetchQuota ?? fetchCodexQuota;
-  const busyAccountIds = new Set(input.busyAccountIds ?? []);
-  const selections: Array<FirstAvailableCodexAccountSelection & { busy: boolean }> = [];
+  const busyAccountCounts = new Map<string, number>();
+  for (const accountId of input.busyAccountIds ?? []) {
+    busyAccountCounts.set(accountId, (busyAccountCounts.get(accountId) ?? 0) + 1);
+  }
+  const selections: Array<FirstAvailableCodexAccountSelection & { activeRuns: number }> = [];
 
   for (const account of input.accounts) {
     const codexHome = resolveCodexAccountHome(account.companyId, account.id);
@@ -228,7 +231,7 @@ export async function selectFirstAvailableCodexAccount(input: {
         accountName: account.name,
         codexHome,
         quotaState: exhausted ? "exhausted_fallback" : "available",
-        busy: busyAccountIds.has(account.id),
+        activeRuns: busyAccountCounts.get(account.id) ?? 0,
       });
     } catch {
       selections.push({
@@ -236,38 +239,37 @@ export async function selectFirstAvailableCodexAccount(input: {
         accountName: account.name,
         codexHome,
         quotaState: "unknown",
-        busy: busyAccountIds.has(account.id),
+        activeRuns: busyAccountCounts.get(account.id) ?? 0,
       });
     }
   }
 
-  // Prefer a profile that both has quota and is not already running another
-  // heartbeat. This turns "first available" into an actual shared pool: two
-  // concurrently active agents no longer pile onto the first authenticated
-  // account while another account sits idle. Busy accounts remain fallbacks so
-  // a company with fewer accounts than workers can still make progress.
-  const preference: Array<[FirstAvailableCodexAccountSelection["quotaState"], boolean]> = [
-    ["available", false],
-    ["unknown", false],
-    ["available", true],
-    ["unknown", true],
-    ["exhausted_fallback", false],
-    ["exhausted_fallback", true],
-  ];
-  for (const [quotaState, busy] of preference) {
-    const selection = selections.find(
-      (candidate) => candidate.quotaState === quotaState && candidate.busy === busy,
-    );
-    if (selection) {
-      return {
+  // Balance by the number of live reservations, not merely by a busy boolean.
+  // With more workers than accounts, the old fallback sent every extra worker
+  // to the first account. Least-loaded selection keeps six parallel lanes
+  // evenly distributed while still avoiding an exhausted account whenever a
+  // usable account exists.
+  const quotaRank: Record<FirstAvailableCodexAccountSelection["quotaState"], number> = {
+    available: 0,
+    unknown: 1,
+    exhausted_fallback: 2,
+  };
+  selections.sort((left, right) => {
+    const exhaustedDelta = Number(left.quotaState === "exhausted_fallback")
+      - Number(right.quotaState === "exhausted_fallback");
+    if (exhaustedDelta !== 0) return exhaustedDelta;
+    if (left.activeRuns !== right.activeRuns) return left.activeRuns - right.activeRuns;
+    return quotaRank[left.quotaState] - quotaRank[right.quotaState];
+  });
+  const selection = selections[0];
+  return selection
+    ? {
         accountId: selection.accountId,
         accountName: selection.accountName,
         codexHome: selection.codexHome,
         quotaState: selection.quotaState,
-      };
-    }
-  }
-  return null;
+      }
+    : null;
 }
 
 export async function resolveFirstAvailableCodexAccount(
