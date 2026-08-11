@@ -423,11 +423,13 @@ Authentication uses the Codex device-code flow in a pseudo-terminal, and the
 one-time code is kept in memory only for the active login. After authentication,
 assign the profile to one or more `codex_local` agents from the same settings
 page, or choose `First available account (automatic)`. Automatic selection checks
-authenticated profiles in creation order at every run boundary and skips an
-account when any reported quota window is exhausted. A transient quota-probe
-failure falls back to an authenticated profile instead of stopping the queue;
-the existing provider-quota retry path handles the case where every account is
-temporarily exhausted. An agent with an explicit `OPENAI_API_KEY` binding cannot
+authenticated profiles at every run boundary, prefers the greatest quota
+headroom with bounded pressure for live reservations, and stops selecting a
+profile at the 95% high-water mark while another usable profile exists. A
+transient quota-probe failure falls back to an authenticated profile instead of
+stopping the queue; the existing provider-quota retry path handles the case where
+every account is temporarily exhausted. An agent with an explicit `OPENAI_API_KEY`
+binding cannot
 use a subscription profile until that binding is removed.
 
 The same settings page shows live usage for every authenticated profile.

@@ -178,6 +178,47 @@ describe("Codex account device login", () => {
     });
   });
 
+  it("prefers quota headroom over an account close to its weekly limit", async () => {
+    const selection = await selectFirstAvailableCodexAccount({
+      accounts: [
+        { id: "account-1", companyId: "company-1", name: "Nearly exhausted" },
+        { id: "account-2", companyId: "company-1", name: "Fresh" },
+      ],
+      busyAccountIds: ["account-2"],
+      readAuthInfo: async (codexHome) => ({
+        ...authenticated,
+        accountId: codexHome?.includes("account-1") ? "chatgpt-account-1" : "chatgpt-account-2",
+      }),
+      fetchQuota: async (_token, accountId) => [
+        quotaWindow(accountId === "chatgpt-account-1" ? 86 : 7),
+      ],
+    });
+
+    expect(selection).toMatchObject({
+      accountId: "account-2",
+      accountName: "Fresh",
+      quotaState: "available",
+    });
+  });
+
+  it("treats 95 percent usage as the automatic-selection high-water mark", async () => {
+    const selection = await selectFirstAvailableCodexAccount({
+      accounts: [
+        { id: "account-1", companyId: "company-1", name: "High water" },
+        { id: "account-2", companyId: "company-1", name: "Usable" },
+      ],
+      readAuthInfo: async (codexHome) => ({
+        ...authenticated,
+        accountId: codexHome?.includes("account-1") ? "chatgpt-account-1" : "chatgpt-account-2",
+      }),
+      fetchQuota: async (_token, accountId) => [
+        quotaWindow(accountId === "chatgpt-account-1" ? 95 : 80),
+      ],
+    });
+
+    expect(selection).toMatchObject({ accountId: "account-2", quotaState: "available" });
+  });
+
   it("reports live usage windows and their reset timestamps without exposing credentials", async () => {
     const quota = await loadCodexAccountQuota({
       accessToken: "private-access-token",

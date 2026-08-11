@@ -29,6 +29,8 @@ const ANSI_ESCAPE_RE = /\u001b\[[0-?]*[ -\/]*[@-~]/g;
 const DEVICE_URL_RE = /https:\/\/[^\s]+\/codex\/device/i;
 const DEVICE_CODE_RE = /\b[A-Z0-9]{4,6}-[A-Z0-9]{4,6}\b/i;
 const accountSelectionLocks = new Map<string, Promise<void>>();
+const CODEX_ACCOUNT_QUOTA_HIGH_WATER_PERCENT = 95;
+const CODEX_ACCOUNT_ACTIVE_RUN_PRESSURE_PERCENT = 15;
 
 export interface CodexLoginCommand {
   command: string;
@@ -229,7 +231,10 @@ export async function selectFirstAvailableCodexAccount(input: {
   for (const accountId of input.busyAccountIds ?? []) {
     busyAccountCounts.set(accountId, (busyAccountCounts.get(accountId) ?? 0) + 1);
   }
-  const selections: Array<FirstAvailableCodexAccountSelection & { activeRuns: number }> = [];
+  const selections: Array<FirstAvailableCodexAccountSelection & {
+    activeRuns: number;
+    usedPercent: number | null;
+  }> = [];
 
   for (const account of input.accounts) {
     const codexHome = resolveCodexAccountHome(account.companyId, account.id);
@@ -238,15 +243,19 @@ export async function selectFirstAvailableCodexAccount(input: {
 
     try {
       const windows = await fetchQuota(auth.accessToken, auth.accountId);
-      const exhausted = windows.some(
-        (window) => window.usedPercent != null && window.usedPercent >= 100,
-      );
+      const reportedUsage = windows
+        .map((window) => window.usedPercent)
+        .filter((value): value is number => value != null && Number.isFinite(value));
+      const usedPercent = reportedUsage.length > 0 ? Math.max(...reportedUsage) : null;
+      const exhausted =
+        usedPercent != null && usedPercent >= CODEX_ACCOUNT_QUOTA_HIGH_WATER_PERCENT;
       selections.push({
         accountId: account.id,
         accountName: account.name,
         codexHome,
         quotaState: exhausted ? "exhausted_fallback" : "available",
         activeRuns: busyAccountCounts.get(account.id) ?? 0,
+        usedPercent,
       });
     } catch {
       selections.push({
@@ -255,15 +264,16 @@ export async function selectFirstAvailableCodexAccount(input: {
         codexHome,
         quotaState: "unknown",
         activeRuns: busyAccountCounts.get(account.id) ?? 0,
+        usedPercent: null,
       });
     }
   }
 
-  // Balance by the number of live reservations, not merely by a busy boolean.
-  // With more workers than accounts, the old fallback sent every extra worker
-  // to the first account. Least-loaded selection keeps six parallel lanes
-  // evenly distributed while still avoiding an exhausted account whenever a
-  // usable account exists.
+  // Prefer actual quota headroom and use live reservations as bounded pressure.
+  // Pure round-robin can keep selecting an account already near its weekly cap;
+  // pure quota sorting can overload one process profile. Fifteen percentage
+  // points per live run balances both signals while the 95% high-water mark
+  // keeps a safety margin for a run already in flight.
   const quotaRank: Record<FirstAvailableCodexAccountSelection["quotaState"], number> = {
     available: 0,
     unknown: 1,
@@ -273,8 +283,14 @@ export async function selectFirstAvailableCodexAccount(input: {
     const exhaustedDelta = Number(left.quotaState === "exhausted_fallback")
       - Number(right.quotaState === "exhausted_fallback");
     if (exhaustedDelta !== 0) return exhaustedDelta;
-    if (left.activeRuns !== right.activeRuns) return left.activeRuns - right.activeRuns;
-    return quotaRank[left.quotaState] - quotaRank[right.quotaState];
+    const quotaDelta = quotaRank[left.quotaState] - quotaRank[right.quotaState];
+    if (quotaDelta !== 0) return quotaDelta;
+    const leftPressure = (left.usedPercent ?? 100)
+      + left.activeRuns * CODEX_ACCOUNT_ACTIVE_RUN_PRESSURE_PERCENT;
+    const rightPressure = (right.usedPercent ?? 100)
+      + right.activeRuns * CODEX_ACCOUNT_ACTIVE_RUN_PRESSURE_PERCENT;
+    if (leftPressure !== rightPressure) return leftPressure - rightPressure;
+    return left.activeRuns - right.activeRuns;
   });
   const selection = selections[0];
   return selection
