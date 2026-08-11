@@ -28,6 +28,7 @@ const LOGIN_OUTPUT_LIMIT = 16_000;
 const ANSI_ESCAPE_RE = /\u001b\[[0-?]*[ -\/]*[@-~]/g;
 const DEVICE_URL_RE = /https:\/\/[^\s]+\/codex\/device/i;
 const DEVICE_CODE_RE = /\b[A-Z0-9]{4,6}-[A-Z0-9]{4,6}\b/i;
+const accountSelectionLocks = new Map<string, Promise<void>>();
 
 export interface CodexLoginCommand {
   command: string;
@@ -176,6 +177,29 @@ export interface FirstAvailableCodexAccountSelection {
   accountName: string;
   codexHome: string;
   quotaState: "available" | "unknown" | "exhausted_fallback";
+}
+
+export async function withCodexAccountSelectionLock<T>(
+  companyId: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const previous = accountSelectionLocks.get(companyId) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => current, () => current);
+  accountSelectionLocks.set(companyId, tail);
+
+  await previous.catch(() => undefined);
+  try {
+    return await task();
+  } finally {
+    release();
+    if (accountSelectionLocks.get(companyId) === tail) {
+      accountSelectionLocks.delete(companyId);
+    }
+  }
 }
 
 export async function selectFirstAvailableCodexAccount(input: {

@@ -4,6 +4,7 @@ import {
   parseCodexDevicePrompt,
   resolveCodexLoginCommand,
   selectFirstAvailableCodexAccount,
+  withCodexAccountSelectionLock,
 } from "./codex-accounts.js";
 
 const authenticated = {
@@ -27,6 +28,35 @@ function quotaWindow(usedPercent: number) {
 }
 
 describe("Codex account device login", () => {
+  it("serializes simultaneous account reservations for the same company", async () => {
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const startedGate = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+
+    const first = withCodexAccountSelectionLock("company-1", async () => {
+      order.push("first:start");
+      firstStarted();
+      await firstGate;
+      order.push("first:end");
+    });
+    const second = withCodexAccountSelectionLock("company-1", async () => {
+      order.push("second:start");
+      order.push("second:end");
+    });
+
+    await startedGate;
+    expect(order).toEqual(["first:start"]);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(order).toEqual(["first:start", "first:end", "second:start", "second:end"]);
+  });
+
   it("recognizes the current variable-length device code and strips terminal escapes", () => {
     const prompt = parseCodexDevicePrompt([
       "\u001b[1mWelcome to Codex\u001b[0m\r\n",

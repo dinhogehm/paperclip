@@ -177,7 +177,7 @@ Invariants:
 - no cycles in reporting tree
 - `terminated` agents cannot be resumed
 - a selected Codex account must belong to the same company and cannot be combined with an `OPENAI_API_KEY` binding
-- `first_available` resolves an authenticated company account at each run boundary, skipping profiles whose reported quota windows are exhausted and preferring profiles not already used by another queued or running heartbeat
+- `first_available` serializes concurrent run-boundary reservations, resolves an authenticated company account for each run, skips profiles whose reported quota windows are exhausted, and prefers profiles not already used by another queued or running heartbeat
 
 ## 7.2.1 `codex_accounts`
 
