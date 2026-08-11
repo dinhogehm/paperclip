@@ -32,7 +32,11 @@ import {
   countActiveIssueFilters,
   type IssueFilterState,
 } from "../lib/issue-filters";
-import { collectLiveIssueIds, collectSubtreeLiveCounts } from "../lib/liveIssueIds";
+import {
+  collectLiveAgentNamesByIssueId,
+  collectLiveIssueIds,
+  collectSubtreeLiveCounts,
+} from "../lib/liveIssueIds";
 import { formatAssigneeUserLabel } from "../lib/assignees";
 import { buildCompanyUserLabelMap, buildCompanyUserProfileMap } from "../lib/company-members";
 import {
@@ -1000,14 +1004,22 @@ export function Inbox() {
     enabled: shouldUseIssueSearchSupplement,
     placeholderData: (previousData) => previousData,
   });
-  const liveIssueIds = useMemo(
-    () => collectLiveIssueIds(liveRuns, [
+  const liveIssueStatusSnapshots = useMemo(
+    () => [
       ...(issues ?? []),
       ...mineIssuesRaw,
       ...touchedIssuesRaw,
       ...remoteIssueSearchResults,
-    ]),
-    [issues, liveRuns, mineIssuesRaw, remoteIssueSearchResults, touchedIssuesRaw],
+    ],
+    [issues, mineIssuesRaw, remoteIssueSearchResults, touchedIssuesRaw],
+  );
+  const liveIssueIds = useMemo(
+    () => collectLiveIssueIds(liveRuns, liveIssueStatusSnapshots),
+    [liveIssueStatusSnapshots, liveRuns],
+  );
+  const liveAgentNamesByIssueId = useMemo(
+    () => collectLiveAgentNamesByIssueId(liveRuns, liveIssueStatusSnapshots),
+    [liveIssueStatusSnapshots, liveRuns],
   );
   const inboxIssueIdsForExternalObjectSummaries = useMemo(() => {
     const issueIds = new Set<string>();
@@ -2731,6 +2743,7 @@ export function Inbox() {
                           <InboxIssueMetaLeading
                             issue={issue}
                             isLive={isLive}
+                            activeAgentNames={liveAgentNamesByIssueId.get(issue.id)}
                             subtreeLiveCount={liveDescendantCount}
                             showSubtreeLiveChip={showSubtreeLiveChip}
                             showStatus={showStatus}
