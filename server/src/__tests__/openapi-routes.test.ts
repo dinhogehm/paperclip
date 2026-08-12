@@ -64,6 +64,9 @@ const ROUTE_LITERAL_PATTERN = /router\.(get|post|put|patch|delete)\(\s*["'`]([^"
 const ROUTER_METHOD_PATTERN = /router\.(get|post|put|patch|delete)\(/;
 const HTTP_METHODS = new Set(["get", "put", "post", "delete", "options", "head", "patch", "trace"]);
 const explicitOpenApiCoverageExclusions = new Set([
+  // Subscription account settings are board-only local control-plane routes.
+  "claude-accounts.ts",
+  "codex-accounts.ts",
   // Pipeline routes are experimental and not yet represented in the public OpenAPI document.
   "pipelines.ts",
   // Case routes are experimental (enableCases flag) and not yet in the public OpenAPI document.
