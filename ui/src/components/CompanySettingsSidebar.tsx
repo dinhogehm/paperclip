@@ -7,6 +7,7 @@ import {
   FlaskConical,
   KeyRound,
   CircleUserRound,
+  Link2,
   MailPlus,
   MonitorCog,
   Puzzle,
@@ -113,6 +114,12 @@ export function CompanySettingsSidebar() {
             to="/company/settings/claude-accounts"
             label="Claude accounts"
             icon={CircleUserRound}
+            end
+          />
+          <SidebarNavItem
+            to="/company/settings/agent-assignments"
+            label="Agent assignments"
+            icon={Link2}
             end
           />
           <SidebarNavItem

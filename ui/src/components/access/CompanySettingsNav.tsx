@@ -9,6 +9,7 @@ const items = [
   { value: "import", label: "Import", href: "/company/import" },
   { value: "codex-accounts", label: "Codex accounts", href: "/company/settings/codex-accounts" },
   { value: "claude-accounts", label: "Claude accounts", href: "/company/settings/claude-accounts" },
+  { value: "agent-assignments", label: "Agent assignments", href: "/company/settings/agent-assignments" },
   { value: "members", label: "Members", href: "/company/settings/members" },
   { value: "invites", label: "Invites", href: "/company/settings/invites" },
   { value: "secrets", label: "Secrets", href: "/company/settings/secrets" },
@@ -75,6 +76,10 @@ export function getCompanySettingsTab(pathname: string): CompanySettingsTab {
 
   if (pathname.includes("/company/settings/claude-accounts")) {
     return "claude-accounts";
+  }
+
+  if (pathname.includes("/company/settings/agent-assignments")) {
+    return "agent-assignments";
   }
 
   if (pathname.includes("/company/settings/members") || pathname.includes("/company/settings/access")) {

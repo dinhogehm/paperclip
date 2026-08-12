@@ -73,6 +73,8 @@ describe("CompanySettingsNav", () => {
     expect(getCompanySettingsTab("/PAP/company/import")).toBe("import");
     expect(getCompanySettingsTab("/company/settings/codex-accounts")).toBe("codex-accounts");
     expect(getCompanySettingsTab("/PAP/company/settings/claude-accounts")).toBe("claude-accounts");
+    expect(getCompanySettingsTab("/company/settings/agent-assignments")).toBe("agent-assignments");
+    expect(getCompanySettingsTab("/PAP/company/settings/agent-assignments")).toBe("agent-assignments");
     expect(getCompanySettingsTab("/company/settings/members")).toBe("members");
     expect(getCompanySettingsTab("/PAP/company/settings/members")).toBe("members");
     expect(getCompanySettingsTab("/company/settings/access")).toBe("members");
