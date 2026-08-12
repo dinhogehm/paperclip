@@ -145,7 +145,7 @@ export function CompanyClaudeAccounts() {
                   ) : null}
                   {account.login.error ? <p className="mt-3 text-xs text-destructive">{account.login.error}</p> : null}
                   {account.authenticated ? (
-                    <div className="mt-4 grid gap-2 border-t border-border pt-3 sm:grid-cols-2">
+                    <div className="mt-4 grid gap-2 border-t border-border pt-3 sm:grid-cols-2 lg:grid-cols-3">
                       {account.quota.windows.length ? account.quota.windows.map((window) => {
                         const used = window.usedPercent == null ? null : Math.max(0, Math.min(100, Math.round(window.usedPercent)));
                         return <div key={`${window.label}-${window.resetsAt ?? "none"}`} className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
