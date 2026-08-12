@@ -291,6 +291,18 @@ export type {
   CodexAccountsOverview,
 } from "./codex-account.js";
 export type {
+  ClaudeAccount,
+  ClaudeAccountAgent,
+  ClaudeAccountAssignment,
+  ClaudeAccountLoginState,
+  ClaudeAccountLoginStatus,
+  ClaudeAccountMode,
+  ClaudeAccountQuota,
+  ClaudeAccountQuotaStatus,
+  ClaudeAccountQuotaWindow,
+  ClaudeAccountsOverview,
+} from "./claude-account.js";
+export type {
   AgentEligibilityAgent,
   AgentEligibilityLifecycleReason,
   AgentInvalidOrgChainAncestor,

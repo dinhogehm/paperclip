@@ -10,6 +10,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { codexAccounts } from "./codex_accounts.js";
+import { claudeAccounts } from "./claude_accounts.js";
 import { environments } from "./environments.js";
 
 export const agents = pgTable(
@@ -27,6 +28,8 @@ export const agents = pgTable(
     adapterType: text("adapter_type").notNull().default("process"),
     codexAccountMode: text("codex_account_mode").notNull().default("host"),
     codexAccountId: uuid("codex_account_id").references(() => codexAccounts.id, { onDelete: "set null" }),
+    claudeAccountMode: text("claude_account_mode").notNull().default("host"),
+    claudeAccountId: uuid("claude_account_id").references(() => claudeAccounts.id, { onDelete: "set null" }),
     adapterConfig: jsonb("adapter_config").$type<Record<string, unknown>>().notNull().default({}),
     runtimeConfig: jsonb("runtime_config").$type<Record<string, unknown>>().notNull().default({}),
     defaultEnvironmentId: uuid("default_environment_id").references(() => environments.id, { onDelete: "set null" }),
@@ -45,6 +48,7 @@ export const agents = pgTable(
     companyStatusIdx: index("agents_company_status_idx").on(table.companyId, table.status),
     companyReportsToIdx: index("agents_company_reports_to_idx").on(table.companyId, table.reportsTo),
     companyCodexAccountIdx: index("agents_company_codex_account_idx").on(table.companyId, table.codexAccountId),
+    companyClaudeAccountIdx: index("agents_company_claude_account_idx").on(table.companyId, table.claudeAccountId),
     companyDefaultEnvironmentIdx: index("agents_company_default_environment_idx").on(table.companyId, table.defaultEnvironmentId),
   }),
 );

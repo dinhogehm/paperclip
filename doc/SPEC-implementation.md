@@ -178,6 +178,8 @@ Invariants:
 - `terminated` agents cannot be resumed
 - a selected Codex account must belong to the same company and cannot be combined with an `OPENAI_API_KEY` binding
 - `first_available` serializes concurrent run-boundary reservations, resolves an authenticated company account for each run, skips profiles whose reported quota windows are exhausted, and prefers profiles not already used by another queued or running heartbeat
+- a selected Claude account must belong to the same company and cannot be combined with explicit Anthropic API, OAuth token, Bedrock, or Vertex bindings
+- Claude `first_available` uses isolated `CLAUDE_CONFIG_DIR` profiles and applies the same serialized, quota-aware reservation rules at each run boundary
 
 ## 7.2.1 `codex_accounts`
 
@@ -198,6 +200,20 @@ authenticated profile. It includes every available quota window, percent used,
 the provider-reported reset timestamp, fetch time, and a non-sensitive
 availability state. Quota probe failures must remain visible but non-fatal and
 must never expose credentials or raw provider diagnostics.
+
+## 7.2.2 `claude_accounts`
+
+- `id` uuid pk
+- `company_id` uuid fk `companies.id` not null
+- `name` text not null
+- `last_authenticated_at` timestamptz null
+
+The database stores only Claude account metadata and agent assignments. Claude
+CLI credentials remain in a Paperclip-managed local profile. Fixed assignments
+set both Claude config and secure-storage directories. Automatic assignments
+resolve an authenticated Claude.ai subscription profile for each run, include
+live run reservations in selection pressure, and expose provider quota windows
+without storing tokens or raw provider responses.
 
 ## 7.3 `agent_api_keys`
 

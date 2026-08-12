@@ -284,6 +284,10 @@ import {
   resolveFirstAvailableCodexAccount,
   withCodexAccountSelectionLock,
 } from "./codex-accounts.js";
+import {
+  resolveFirstAvailableClaudeAccount,
+  withClaudeAccountSelectionLock,
+} from "./claude-accounts.js";
 import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.js";
 import { environmentRuntimeService } from "./environment-runtime.js";
 import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
@@ -14195,6 +14199,46 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
     } else {
       delete context.paperclipCodexAccount;
+    }
+    if (agent.adapterType === "claude_local" && agent.claudeAccountMode === "first_available") {
+      const selection = await withClaudeAccountSelectionLock(agent.companyId, async () => {
+        const selected = await resolveFirstAvailableClaudeAccount(db, agent.companyId);
+        if (!selected) {
+          throw new ConfigurationIncompleteFailure(
+            "configuration incomplete: automatic Claude account selection requires at least one authenticated account.",
+            {
+              configurationIncomplete: {
+                reason: "claude_account_unavailable",
+                companyId: agent.companyId,
+                agentId: agent.id,
+                issueId: issueId ?? null,
+                adapterType: "claude_local",
+                missingBindings: [],
+              },
+            },
+          );
+        }
+        context.paperclipClaudeAccount = {
+          mode: "first_available",
+          accountId: selected.accountId,
+          accountName: selected.accountName,
+          quotaState: selected.quotaState,
+        };
+        await db.update(heartbeatRuns)
+          .set({ contextSnapshot: context, updatedAt: new Date() })
+          .where(eq(heartbeatRuns.id, run.id));
+        return selected;
+      });
+      executionRunConfig = {
+        ...executionRunConfig,
+        env: {
+          ...parseObject(executionRunConfig.env),
+          CLAUDE_CONFIG_DIR: selection.claudeConfigDir,
+          CLAUDE_SECURESTORAGE_CONFIG_DIR: selection.claudeConfigDir,
+        },
+      };
+    } else {
+      delete context.paperclipClaudeAccount;
     }
     const runScopedMentionedSkillKeys = await resolveRunScopedMentionedSkillKeys({
       db,

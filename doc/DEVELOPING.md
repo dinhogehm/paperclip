@@ -441,6 +441,23 @@ than inventing an absent daily or weekly limit. Quota polling errors are shown
 as a retryable unknown state without exposing tokens or provider response
 bodies.
 
+Company Settings → Claude accounts provides the same isolated multi-account
+control for `claude_local` agents. Each Claude.ai Pro or Max profile stores its
+CLI session at:
+
+- `~/.paperclip/instances/default/companies/<company-id>/claude-accounts/<account-id>/claude-config`
+
+Paperclip starts `claude auth login --claudeai` with both
+`CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR` pointed at that
+profile. A fixed assignment injects those paths into every run. `First
+available account (automatic)` selects at each run boundary, considers current
+session and weekly usage windows, accounts for queued and running reservations,
+and avoids a profile at or above the 95% high-water mark when another profile
+is usable. Local filesystem confinement preserves the selected profile instead
+of replacing it with the shared host config. Explicit API key, OAuth token,
+Bedrock, or Vertex bindings must be removed before a Claude subscription
+profile can be assigned.
+
 Paperclip also persists an empty `OPENAI_API_KEY` override for those agents so a host-level `OPENAI_API_KEY` cannot leak into Codex runs through process inheritance. If an operator explicitly configures `adapterConfig.env.CODEX_HOME`, it must not point at the shared company `codex-home`, `$CODEX_HOME`, or `~/.codex`.
 
 If the `codex` CLI is not installed or not on `PATH`, `codex_local` agent runs fail at execution time with a clear adapter error. Quota polling uses a short-lived `codex app-server` subprocess: when `codex` cannot be spawned, that provider reports `ok: false` in aggregated quota results and the API server keeps running (it must not exit on a missing binary).

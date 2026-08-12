@@ -16,6 +16,7 @@ import type {
 import type { AgentOrgChainHealth } from "../agent-eligibility.js";
 import type { AgentApiKeyScope } from "../validators/agent.js";
 import type { CodexAccountMode } from "./codex-account.js";
+import type { ClaudeAccountMode } from "./claude-account.js";
 
 export interface AgentPermissions extends Record<string, unknown> {
   canCreateAgents: boolean;
@@ -94,6 +95,8 @@ export interface Agent {
   adapterType: AgentAdapterType;
   codexAccountMode?: CodexAccountMode;
   codexAccountId?: string | null;
+  claudeAccountMode?: ClaudeAccountMode;
+  claudeAccountId?: string | null;
   adapterConfig: Record<string, unknown>;
   runtimeConfig: AgentRuntimeConfig;
   defaultEnvironmentId?: string | null;
