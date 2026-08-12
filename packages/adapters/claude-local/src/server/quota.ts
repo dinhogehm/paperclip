@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -85,13 +86,7 @@ function trimToLatestUsagePanel(text: string): string | null {
   return tail;
 }
 
-async function readClaudeTokenFromFile(credPath: string): Promise<string | null> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(credPath, "utf8");
-  } catch {
-    return null;
-  }
+function parseClaudeOAuthAccessToken(raw: string): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -104,6 +99,50 @@ async function readClaudeTokenFromFile(credPath: string): Promise<string | null>
   if (typeof oauth !== "object" || oauth === null) return null;
   const token = (oauth as Record<string, unknown>)["accessToken"];
   return typeof token === "string" && token.length > 0 ? token : null;
+}
+
+async function readClaudeTokenFromFile(credPath: string): Promise<string | null> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(credPath, "utf8");
+  } catch {
+    return null;
+  }
+  return parseClaudeOAuthAccessToken(raw);
+}
+
+/** Claude Code stores subscription tokens in the macOS keychain as
+ * `Claude Code-credentials-<sha256(configDir)[0:8]>` (and sometimes the unhashed service). */
+export function claudeKeychainCredentialServiceName(configDir: string): string {
+  const hash = createHash("sha256").update(configDir).digest("hex").slice(0, 8);
+  return `Claude Code-credentials-${hash}`;
+}
+
+async function readClaudeTokenFromMacKeychain(configDir: string): Promise<string | null> {
+  if (process.platform !== "darwin") return null;
+  const services = [
+    claudeKeychainCredentialServiceName(configDir),
+    "Claude Code-credentials",
+  ];
+  const account = os.userInfo().username;
+  for (const service of services) {
+    for (const args of [
+      ["find-generic-password", "-s", service, "-a", account, "-w"],
+      ["find-generic-password", "-s", service, "-w"],
+    ]) {
+      try {
+        const { stdout } = await execFileAsync("security", args, {
+          timeout: 5_000,
+          maxBuffer: 1024 * 1024,
+        });
+        const token = parseClaudeOAuthAccessToken(stdout.trim());
+        if (token) return token;
+      } catch {
+        // try next lookup shape
+      }
+    }
+  }
+  return null;
 }
 
 export interface ClaudeAuthStatus {
@@ -144,7 +183,7 @@ export async function readClaudeToken(env: NodeJS.ProcessEnv = process.env): Pro
     const token = await readClaudeTokenFromFile(path.join(configDir, filename));
     if (token) return token;
   }
-  return null;
+  return readClaudeTokenFromMacKeychain(configDir);
 }
 
 interface AnthropicUsageWindow {

@@ -11,7 +11,9 @@ import {
   parseClaudeCliUsageText,
   readClaudeToken,
   claudeConfigDir,
+  claudeKeychainCredentialServiceName,
 } from "@paperclipai/adapter-claude-local/server";
+import { createHash } from "node:crypto";
 
 import {
   secondsToWindowLabel,
@@ -306,6 +308,14 @@ describe("readClaudeToken", () => {
     const token = await readClaudeToken();
     expect(token).toBe("dotfile-token");
     await import("node:fs/promises").then((fs) => fs.rm(tmpDir, { recursive: true }));
+  });
+});
+
+describe("claudeKeychainCredentialServiceName", () => {
+  it("uses the first 8 hex chars of sha256(configDir)", () => {
+    const configDir = "/tmp/paperclip-claude-config";
+    const expected = `Claude Code-credentials-${createHash("sha256").update(configDir).digest("hex").slice(0, 8)}`;
+    expect(claudeKeychainCredentialServiceName(configDir)).toBe(expected);
   });
 });
 
