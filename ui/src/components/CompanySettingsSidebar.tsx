@@ -110,6 +110,12 @@ export function CompanySettingsSidebar() {
             end
           />
           <SidebarNavItem
+            to="/company/settings/claude-accounts"
+            label="Claude accounts"
+            icon={CircleUserRound}
+            end
+          />
+          <SidebarNavItem
             to="/company/settings/members"
             label="Members"
             icon={Users}

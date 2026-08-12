@@ -1,5 +1,6 @@
 export { companies } from "./companies.js";
 export { codexAccounts } from "./codex_accounts.js";
+export { claudeAccounts } from "./claude_accounts.js";
 export { companyLogos } from "./company_logos.js";
 export { authUsers, authSessions, authAccounts, authVerifications } from "./auth.js";
 export { instanceSettings } from "./instance_settings.js";

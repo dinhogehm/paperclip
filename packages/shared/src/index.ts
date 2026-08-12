@@ -163,6 +163,18 @@ export type {
   CodexAccountsOverview,
 } from "./types/codex-account.js";
 export type {
+  ClaudeAccount,
+  ClaudeAccountAgent,
+  ClaudeAccountAssignment,
+  ClaudeAccountLoginState,
+  ClaudeAccountLoginStatus,
+  ClaudeAccountMode,
+  ClaudeAccountQuota,
+  ClaudeAccountQuotaStatus,
+  ClaudeAccountQuotaWindow,
+  ClaudeAccountsOverview,
+} from "./types/claude-account.js";
+export type {
   DecisionTrainingExample,
   DecisionTrainingNotesHistoryEntry,
   DecisionTrainingPreview,

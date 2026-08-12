@@ -526,6 +526,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   });
   const localMcpConfigDir = path.dirname(localMcpConfigPath);
   const sharedClaudeConfigDir = resolveSharedClaudeConfigDir(process.env);
+  const selectedClaudeConfigDir = typeof env.CLAUDE_CONFIG_DIR === "string" && env.CLAUDE_CONFIG_DIR.trim()
+    ? path.resolve(env.CLAUDE_CONFIG_DIR.trim())
+    : sharedClaudeConfigDir;
   const networkScope = parseLocalProcessNetworkScope(config.networkScope);
   const filesystemScope = parseLocalProcessFilesystemScope(config.filesystemScope);
   const localProcessSandbox: LocalProcessSandboxOptions | null =
@@ -534,13 +537,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           workspaceDir: effectiveExecutionCwd,
           filesystemScope,
           managedPaths: [
-            { path: sharedClaudeConfigDir, access: "rw" },
-            { path: path.join(path.dirname(sharedClaudeConfigDir), ".claude.json"), access: "rw" },
+            { path: selectedClaudeConfigDir, access: "rw" },
+            { path: path.join(path.dirname(selectedClaudeConfigDir), ".claude.json"), access: "rw" },
             { path: promptBundle.addDir, access: "ro" },
             { path: localMcpConfigDir, access: "ro" },
           ],
           extraPaths: parseLocalProcessSandboxExtraPaths(config.filesystemExtraPaths),
-          homeDir: filesystemScope ? path.dirname(sharedClaudeConfigDir) : null,
+          homeDir: filesystemScope ? path.dirname(selectedClaudeConfigDir) : null,
           networkScope,
           networkAllowlist: parseLocalProcessNetworkAllowlist(config.networkAllowlist),
           networkTrustedUrls: [
@@ -551,7 +554,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         }
       : null;
   if (localProcessSandbox) {
-    if (filesystemScope) env.CLAUDE_CONFIG_DIR = sharedClaudeConfigDir;
+    if (filesystemScope) env.CLAUDE_CONFIG_DIR = selectedClaudeConfigDir;
     const scopes = [filesystemScope ? "workspace filesystem" : null, networkScope ? `${networkScope} network` : null]
       .filter(Boolean)
       .join(" and ");

@@ -8,6 +8,9 @@ export const queryKeys = {
   codexAccounts: {
     list: (companyId: string) => ["codex-accounts", companyId] as const,
   },
+  claudeAccounts: {
+    list: (companyId: string) => ["claude-accounts", companyId] as const,
+  },
   apps: {
     gallery: (companyId: string) => ["apps", companyId, "gallery"] as const,
     attention: (companyId: string) => ["apps", companyId, "attention"] as const,

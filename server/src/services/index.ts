@@ -5,6 +5,12 @@ export {
   resolveFirstAvailableCodexAccount,
   selectFirstAvailableCodexAccount,
 } from "./codex-accounts.js";
+export {
+  claudeAccountService,
+  resolveClaudeAccountConfigDir,
+  resolveFirstAvailableClaudeAccount,
+  selectFirstAvailableClaudeAccount,
+} from "./claude-accounts.js";
 export { companyArtifactsService } from "./company-artifacts.js";
 export { companySearchService } from "./company-search.js";
 export { companySearchExtractService } from "./company-search-extract.js";
