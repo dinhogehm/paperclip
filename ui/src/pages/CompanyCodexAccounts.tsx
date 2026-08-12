@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Bot,
   CheckCircle2,
   CircleAlert,
   Copy,
@@ -14,7 +13,6 @@ import {
 } from "lucide-react";
 import type {
   CodexAccount,
-  CodexAccountAssignment,
   CodexAccountQuotaWindow,
 } from "@paperclipai/shared";
 import { codexAccountsApi } from "@/api/codexAccounts";
@@ -22,10 +20,9 @@ import { Button } from "@/components/ui/button";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useCompany } from "@/context/CompanyContext";
 import { copyTextToClipboard } from "@/lib/clipboard";
+import { Link } from "@/lib/router";
 import { queryKeys } from "@/lib/queryKeys";
 import { formatDateTime } from "@/lib/utils";
-
-const FIRST_AVAILABLE_VALUE = "__first_available__";
 
 function accountStatusLabel(account: CodexAccount) {
   if (account.authenticated) return "Authenticated";
@@ -158,17 +155,6 @@ export function CompanyCodexAccounts() {
 
   const loginMutation = useMutation({
     mutationFn: (accountId: string) => codexAccountsApi.startLogin(selectedCompanyId!, accountId),
-    onSuccess: invalidateAccounts,
-  });
-
-  const assignmentMutation = useMutation({
-    mutationFn: ({
-      agentId,
-      assignment,
-    }: {
-      agentId: string;
-      assignment: CodexAccountAssignment;
-    }) => codexAccountsApi.assignAgent(selectedCompanyId!, agentId, assignment),
     onSuccess: invalidateAccounts,
   });
 
@@ -407,66 +393,16 @@ export function CompanyCodexAccounts() {
         ) : null}
       </section>
 
-      <section className="space-y-3" aria-labelledby="agent-assignments-heading">
-        <div>
-          <h2 id="agent-assignments-heading" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Agent assignments
-          </h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Choose a fixed isolated account, the shared host session, or automatic quota-aware selection.
-          </p>
-        </div>
-        <div className="divide-y divide-border rounded-md border border-border">
-          {(accountsQuery.data?.agents.length ?? 0) === 0 ? (
-            <p className="p-4 text-sm text-muted-foreground">No active Codex agents in this company.</p>
-          ) : (
-            accountsQuery.data?.agents.map((agent) => (
-              <div key={agent.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex min-w-0 items-center gap-2">
-                  <Bot className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">{agent.name}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {agent.subscriptionAccountBlocker ?? agent.status}
-                    </p>
-                  </div>
-                </div>
-                <select
-                  aria-label={`Codex account for ${agent.name}`}
-                  className="rounded-md border border-border bg-background px-2.5 py-1.5 text-sm outline-none sm:w-72"
-                  value={
-                    agent.codexAccountMode === "first_available"
-                      ? FIRST_AVAILABLE_VALUE
-                      : agent.codexAccountMode === "fixed"
-                        ? agent.codexAccountId ?? ""
-                        : ""
-                  }
-                  disabled={!agent.canUseSubscriptionAccount || assignmentMutation.isPending}
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    assignmentMutation.mutate({
-                      agentId: agent.id,
-                      assignment: value === FIRST_AVAILABLE_VALUE
-                        ? { mode: "first_available", accountId: null }
-                        : value
-                          ? { mode: "fixed", accountId: value }
-                          : { mode: "host", accountId: null },
-                    });
-                  }}
-                >
-                  <option value="">Host account (shared session)</option>
-                  <option value={FIRST_AVAILABLE_VALUE}>First available account (automatic)</option>
-                  {authenticatedAccounts.map((account) => (
-                    <option key={account.id} value={account.id}>{account.name}</option>
-                  ))}
-                </select>
-              </div>
-            ))
-          )}
-        </div>
-        {assignmentMutation.isError ? (
-          <p className="text-xs text-destructive">{assignmentMutation.error.message}</p>
-        ) : null}
+      <section className="space-y-3 rounded-md border border-border p-4" aria-labelledby="agent-assignments-heading">
+        <h2 id="agent-assignments-heading" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          Agent assignments
+        </h2>
+        <p className="text-sm text-muted-foreground">
+          Assign Codex or Claude accounts to any agent from the shared assignments page.
+        </p>
+        <Button size="sm" variant="outline" asChild>
+          <Link to="/company/settings/agent-assignments">Open agent assignments</Link>
+        </Button>
       </section>
     </div>
   );

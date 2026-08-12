@@ -10,6 +10,9 @@ const mockApi = vi.hoisted(() => ({
   list: vi.fn(), create: vi.fn(), startLogin: vi.fn(), assignAgent: vi.fn(), remove: vi.fn(),
 }));
 vi.mock("@/api/claudeAccounts", () => ({ claudeAccountsApi: mockApi }));
+vi.mock("@/lib/router", () => ({
+  Link: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,
+}));
 vi.mock("@/context/BreadcrumbContext", () => ({ useBreadcrumbs: () => ({ setBreadcrumbs: vi.fn() }) }));
 vi.mock("@/context/CompanyContext", () => ({
   useCompany: () => ({ selectedCompanyId: "company-1", selectedCompany: { id: "company-1", name: "NUR" } }),
@@ -53,19 +56,13 @@ describe("CompanyClaudeAccounts", () => {
   });
   afterEach(() => { container.remove(); document.body.innerHTML = ""; vi.clearAllMocks(); });
 
-  it("shows quota and allows first-available assignment", async () => {
+  it("shows quota and links to the shared agent assignments page", async () => {
     const root = createRoot(container);
     await act(async () => root.render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><CompanyClaudeAccounts /></QueryClientProvider>));
     await waitFor(() => expect(container.textContent).toContain("75% available"));
-    const select = container.querySelector('select[aria-label="Claude account for Claude Engineer"]') as HTMLSelectElement;
-    expect(Array.from(select.options).map((option) => option.textContent)).toContain("First available account (automatic)");
-    await act(async () => {
-      select.value = "__first_available__";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    await waitFor(() => expect(mockApi.assignAgent).toHaveBeenCalledWith(
-      "company-1", "agent-1", { mode: "first_available", accountId: null },
-    ));
+    expect(container.textContent).toContain("Open agent assignments");
+    expect(container.querySelector('a[href="/company/settings/agent-assignments"]')).not.toBeNull();
+    expect(container.querySelector('select[aria-label="Claude account for Claude Engineer"]')).toBeNull();
     await act(async () => root.unmount());
   });
 });
