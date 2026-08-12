@@ -25,6 +25,19 @@ flags:
 agent-browser skills get core --full
 ```
 
+When `AGENT_BROWSER_AUTH_PROFILE` is set, use the named CLI vault profile for authenticated test
+flows. Do not print or inspect its credentials:
+
+```bash
+agent-browser auth login "$AGENT_BROWSER_AUTH_PROFILE"
+agent-browser open <authenticated-url>
+```
+
+Paperclip may also set `AGENT_BROWSER_RESTORE` to a different value for each agent. Keep that value
+unchanged so the CLI can save and restore login state without sharing live cookies between parallel
+agents. If the target redirects back to its login page, run `auth login` again and repeat the exact
+navigation before treating the environment as unavailable.
+
 ## Core workflow
 
 ```bash

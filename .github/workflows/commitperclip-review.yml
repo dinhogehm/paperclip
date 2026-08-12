@@ -17,6 +17,8 @@ jobs:
   review:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
     steps:
       - name: Checkout base branch (never PR code)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -40,16 +42,21 @@ jobs:
 
       - name: Generate commitperclip token
         id: token
+        if: env.COMMITPERCLIP_KEY != ''
         run: |
           TOKEN=$(node .github/scripts/get-bot-token.mjs)
           echo "::add-mask::$TOKEN"
           echo "value=$TOKEN" >> $GITHUB_OUTPUT
-        env:
-          COMMITPERCLIP_KEY: ${{ secrets.COMMITPERCLIP_KEY }}
+
+      - name: Explain unavailable commitperclip review
+        if: env.COMMITPERCLIP_KEY == ''
+        run: echo "commitperclip review skipped because this repository has no COMMITPERCLIP_KEY secret."
 
       - name: Run quality gates
         id: quality
-        if: github.event.pull_request.user.login != 'dependabot[bot]'
+        if: >-
+          env.COMMITPERCLIP_KEY != '' &&
+          github.event.pull_request.user.login != 'dependabot[bot]'
         run: node .github/scripts/run-quality-gates.mjs
         continue-on-error: true
         env:
@@ -60,6 +67,7 @@ jobs:
           PR_BRANCH: ${{ github.event.pull_request.head.ref }}
 
       - name: Run security gates
+        if: env.COMMITPERCLIP_KEY != ''
         run: node .github/scripts/check-pr-security.mjs
         continue-on-error: true
         timeout-minutes: 3
@@ -71,6 +79,7 @@ jobs:
 
       - name: Fail if quality gates failed
         if: >-
+          env.COMMITPERCLIP_KEY != '' &&
           github.event.pull_request.user.login != 'dependabot[bot]' &&
           steps.quality.outcome == 'failure'
         run: |
