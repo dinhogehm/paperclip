@@ -184,7 +184,7 @@ export function CompanyClaudeAccounts() {
           <p className="mt-1 text-xs text-muted-foreground">Choose the shared host session, one fixed profile, or the first account with quota available.</p>
         </div>
         <div className="divide-y divide-border rounded-md border border-border">
-          {(accountsQuery.data?.agents.length ?? 0) === 0 ? <p className="p-4 text-sm text-muted-foreground">No active Claude agents in this company.</p> : accountsQuery.data?.agents.map((agent) => (
+          {(accountsQuery.data?.agents.length ?? 0) === 0 ? <p className="p-4 text-sm text-muted-foreground">No active Claude agents in this company. Switch an agent&apos;s adapter to Claude (claude_local) in the agent settings, then assign a subscription account here.</p> : accountsQuery.data?.agents.map((agent) => (
             <div key={agent.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex min-w-0 items-center gap-2"><Bot className="h-4 w-4 shrink-0 text-muted-foreground" /><div className="min-w-0"><p className="truncate text-sm font-medium">{agent.name}</p><p className="text-xs text-muted-foreground">{agent.subscriptionAccountBlocker ?? agent.status}</p></div></div>
               <select

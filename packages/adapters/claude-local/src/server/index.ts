@@ -25,6 +25,7 @@ export {
   captureClaudeCliUsageText,
   parseClaudeCliUsageText,
   withClaudePrimaryQuotaWindows,
+  claudeKeychainCredentialServiceName,
   toPercent,
   fetchWithTimeout,
   claudeConfigDir,
