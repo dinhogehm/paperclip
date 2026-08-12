@@ -31,8 +31,14 @@ export interface AgentModelProfileConfig {
   adapterConfig: Record<string, unknown>;
 }
 
+export interface AgentSubscriptionFailoverConfig {
+  enabled: boolean;
+  order: ["codex_local" | "claude_local", "codex_local" | "claude_local"];
+}
+
 export interface AgentRuntimeConfig extends Record<string, unknown> {
   modelProfiles?: Partial<Record<ModelProfileKey, AgentModelProfileConfig>>;
+  subscriptionFailover?: AgentSubscriptionFailoverConfig;
 }
 
 export type AgentInstructionsBundleMode = "managed" | "external";

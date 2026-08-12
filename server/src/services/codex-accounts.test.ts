@@ -272,4 +272,14 @@ describe("Codex account device login", () => {
     });
     expect(JSON.stringify(quota)).not.toContain("sensitive diagnostics");
   });
+
+  it("returns null with preferAvailableOnly when only exhausted accounts exist", async () => {
+    const selection = await selectFirstAvailableCodexAccount({
+      accounts: [{ id: "account-1", companyId: "company-1", name: "Exhausted" }],
+      preferAvailableOnly: true,
+      readAuthInfo: async () => authenticated,
+      fetchQuota: async () => [quotaWindow(96)],
+    });
+    expect(selection).toBeNull();
+  });
 });

@@ -288,6 +288,13 @@ import {
   resolveFirstAvailableClaudeAccount,
   withClaudeAccountSelectionLock,
 } from "./claude-accounts.js";
+import {
+  readSubscriptionFailoverConfig,
+  resolveEffectiveSubscriptionAdapter,
+  nextSubscriptionFailoverAdapter,
+  withSubscriptionFailoverRetryContext,
+  type SubscriptionAdapterType,
+} from "./subscription-failover.js";
 import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.js";
 import { environmentRuntimeService } from "./environment-runtime.js";
 import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
@@ -11215,7 +11222,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const shouldQuarantineWorkspaceForRetry =
       workspaceValidationRetryPayload !== null &&
       Object.keys(workspaceValidationRetryPayload).length > 0;
-    const retryContextSnapshot: Record<string, unknown> = withRecoveryModelProfileHint({
+    const failoverRetryAdapter =
+      transientRecovery?.errorFamily === "provider_quota"
+        ? nextSubscriptionFailoverAdapter({
+            runtimeConfig: agent.runtimeConfig,
+            currentAdapterType:
+              resolveEffectiveSubscriptionAdapter({
+                agentAdapterType: agent.adapterType,
+                runtimeConfig: agent.runtimeConfig,
+                contextSnapshot: contextSnapshot,
+              }) ?? agent.adapterType,
+          })
+        : null;
+    let retryContextBase: Record<string, unknown> = {
       ...contextSnapshot,
       retryOfRunId: run.id,
       wakeReason,
@@ -11239,7 +11258,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ? { providerQuotaRetryNotBefore: transientRetryNotBefore.toISOString() }
         : {}),
       ...(codexTransientFallbackMode ? { codexTransientFallbackMode } : {}),
-    }, "normal_model");
+    };
+    if (failoverRetryAdapter) {
+      retryContextBase = withSubscriptionFailoverRetryContext(retryContextBase, failoverRetryAdapter);
+    }
+    const retryContextSnapshot: Record<string, unknown> = withRecoveryModelProfileHint(retryContextBase, "normal_model");
     const responsibleUserId = await resolveResponsibleUserIdForRunContext(run, retryContextSnapshot);
     const continuationRetryIdempotencyKey = retryReason === MAX_TURN_CONTINUATION_RETRY_REASON
       ? `max-turn-continuation:${run.companyId}:${issueId ?? "no-issue"}:${run.id}:${schedule.attempt}`
@@ -13603,7 +13626,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const runtime = await ensureRuntimeState(agent);
     const context = parseObject(run.contextSnapshot);
     const taskKey = deriveTaskKeyWithHeartbeatFallback(context, null);
-    const sessionCodec = getAdapterSessionCodec(agent.adapterType);
+    let effectiveAdapterType =
+      resolveEffectiveSubscriptionAdapter({
+        agentAdapterType: agent.adapterType,
+        runtimeConfig: agent.runtimeConfig,
+        contextSnapshot: context,
+      }) ?? agent.adapterType;
+    const sessionCodec = getAdapterSessionCodec(effectiveAdapterType);
     const issueId = readNonEmptyString(context.issueId);
     let issueContext = issueId ? await getIssueExecutionContext(agent.companyId, issueId) : null;
     const issueDependencyReadiness = issueId
@@ -14125,7 +14154,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     let adapterModelProfiles: AdapterModelProfileDefinition[] = [];
     let profileResolutionFallbackReason: string | null = null;
     try {
-      adapterModelProfiles = await listAdapterModelProfiles(agent.adapterType);
+      adapterModelProfiles = await listAdapterModelProfiles(effectiveAdapterType);
     } catch (error) {
       profileResolutionFallbackReason = "adapter_profile_resolution_failed";
       logger.warn(
@@ -14133,7 +14162,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           err: error,
           companyId: agent.companyId,
           agentId: agent.id,
-          adapterType: agent.adapterType,
+          adapterType: effectiveAdapterType,
           runId: run.id,
         },
         "Failed to resolve adapter model profiles; falling back to primary adapter config",
@@ -14160,10 +14189,33 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
     const configSnapshot = buildExecutionWorkspaceConfigSnapshot(mergedConfig, selectedEnvironmentId);
     let executionRunConfig = stripWorkspaceRuntimeFromExecutionRunConfig(mergedConfig);
-    if (agent.adapterType === "codex_local" && agent.codexAccountMode === "first_available") {
+    const failoverConfig = readSubscriptionFailoverConfig(agent.runtimeConfig);
+    const forcedFailoverAdapter = context.paperclipEffectiveAdapterType;
+
+    async function injectFirstAvailableCodexAccount(opts: {
+      preferAvailableOnly?: boolean;
+      throwOnMissing?: boolean;
+    }): Promise<"injected" | "none_available" | "not_applicable"> {
+      if (agent.codexAccountMode !== "first_available") return "not_applicable";
       const selection = await withCodexAccountSelectionLock(agent.companyId, async () => {
-        const selected = await resolveFirstAvailableCodexAccount(db, agent.companyId);
-        if (!selected) {
+        const selected = await resolveFirstAvailableCodexAccount(db, agent.companyId, {
+          preferAvailableOnly: opts.preferAvailableOnly,
+        });
+        if (!selected) return null;
+        context.paperclipCodexAccount = {
+          mode: "first_available",
+          accountId: selected.accountId,
+          accountName: selected.accountName,
+          quotaState: selected.quotaState,
+        };
+        await db
+          .update(heartbeatRuns)
+          .set({ contextSnapshot: context, updatedAt: new Date() })
+          .where(eq(heartbeatRuns.id, run.id));
+        return selected;
+      });
+      if (!selection) {
+        if (opts.throwOnMissing) {
           throw new ConfigurationIncompleteFailure(
             "configuration incomplete: automatic Codex account selection requires at least one authenticated account.",
             {
@@ -14178,18 +14230,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             },
           );
         }
-        context.paperclipCodexAccount = {
-          mode: "first_available",
-          accountId: selected.accountId,
-          accountName: selected.accountName,
-          quotaState: selected.quotaState,
-        };
-        await db
-          .update(heartbeatRuns)
-          .set({ contextSnapshot: context, updatedAt: new Date() })
-          .where(eq(heartbeatRuns.id, run.id));
-        return selected;
-      });
+        return "none_available";
+      }
       executionRunConfig = {
         ...executionRunConfig,
         env: {
@@ -14197,13 +14239,32 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           CODEX_HOME: selection.codexHome,
         },
       };
-    } else {
-      delete context.paperclipCodexAccount;
+      return "injected";
     }
-    if (agent.adapterType === "claude_local" && agent.claudeAccountMode === "first_available") {
+
+    async function injectFirstAvailableClaudeAccount(opts: {
+      preferAvailableOnly?: boolean;
+      throwOnMissing?: boolean;
+    }): Promise<"injected" | "none_available" | "not_applicable"> {
+      if (agent.claudeAccountMode !== "first_available") return "not_applicable";
       const selection = await withClaudeAccountSelectionLock(agent.companyId, async () => {
-        const selected = await resolveFirstAvailableClaudeAccount(db, agent.companyId);
-        if (!selected) {
+        const selected = await resolveFirstAvailableClaudeAccount(db, agent.companyId, {
+          preferAvailableOnly: opts.preferAvailableOnly,
+        });
+        if (!selected) return null;
+        context.paperclipClaudeAccount = {
+          mode: "first_available",
+          accountId: selected.accountId,
+          accountName: selected.accountName,
+          quotaState: selected.quotaState,
+        };
+        await db.update(heartbeatRuns)
+          .set({ contextSnapshot: context, updatedAt: new Date() })
+          .where(eq(heartbeatRuns.id, run.id));
+        return selected;
+      });
+      if (!selection) {
+        if (opts.throwOnMissing) {
           throw new ConfigurationIncompleteFailure(
             "configuration incomplete: automatic Claude account selection requires at least one authenticated account.",
             {
@@ -14218,17 +14279,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             },
           );
         }
-        context.paperclipClaudeAccount = {
-          mode: "first_available",
-          accountId: selected.accountId,
-          accountName: selected.accountName,
-          quotaState: selected.quotaState,
-        };
-        await db.update(heartbeatRuns)
-          .set({ contextSnapshot: context, updatedAt: new Date() })
-          .where(eq(heartbeatRuns.id, run.id));
-        return selected;
-      });
+        return "none_available";
+      }
       executionRunConfig = {
         ...executionRunConfig,
         env: {
@@ -14237,8 +14289,56 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           CLAUDE_SECURESTORAGE_CONFIG_DIR: selection.claudeConfigDir,
         },
       };
+      return "injected";
+    }
+
+    async function injectFirstAvailableForAdapter(
+      adapterType: SubscriptionAdapterType,
+      opts: { preferAvailableOnly?: boolean; throwOnMissing?: boolean },
+    ): Promise<"injected" | "none_available" | "not_applicable"> {
+      if (adapterType === "codex_local") return injectFirstAvailableCodexAccount(opts);
+      return injectFirstAvailableClaudeAccount(opts);
+    }
+
+    delete context.paperclipCodexAccount;
+    delete context.paperclipClaudeAccount;
+
+    if (failoverConfig && !forcedFailoverAdapter) {
+      const [primary, secondary] = failoverConfig.order;
+      const primaryUsesFirstAvailable =
+        (primary === "codex_local" && agent.codexAccountMode === "first_available")
+        || (primary === "claude_local" && agent.claudeAccountMode === "first_available");
+      if (primaryUsesFirstAvailable) {
+        const primaryResult = await injectFirstAvailableForAdapter(primary, { preferAvailableOnly: true });
+        if (primaryResult === "none_available") {
+          delete context.paperclipCodexAccount;
+          delete context.paperclipClaudeAccount;
+          const secondaryResult = await injectFirstAvailableForAdapter(secondary, { preferAvailableOnly: true });
+          if (secondaryResult === "injected") {
+            effectiveAdapterType = secondary;
+            context.forceFreshSession = true;
+          } else {
+            effectiveAdapterType = primary;
+            await injectFirstAvailableForAdapter(primary, { throwOnMissing: true });
+          }
+        } else if (primaryResult === "injected") {
+          effectiveAdapterType = primary;
+        } else {
+          effectiveAdapterType = primary;
+        }
+      } else {
+        effectiveAdapterType = primary;
+      }
+    } else if (effectiveAdapterType === "codex_local" && agent.codexAccountMode === "first_available") {
+      await injectFirstAvailableCodexAccount({ throwOnMissing: true });
+    } else if (effectiveAdapterType === "claude_local" && agent.claudeAccountMode === "first_available") {
+      await injectFirstAvailableClaudeAccount({ throwOnMissing: true });
+    }
+
+    if (effectiveAdapterType === "codex_local" || effectiveAdapterType === "claude_local") {
+      context.paperclipEffectiveAdapterType = effectiveAdapterType;
     } else {
-      delete context.paperclipClaudeAccount;
+      delete context.paperclipEffectiveAdapterType;
     }
     const runScopedMentionedSkillKeys = await resolveRunScopedMentionedSkillKeys({
       db,
@@ -14246,14 +14346,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueId,
     });
     const pushCapabilityPreflightRequired = requiresPushCapabilityPreflight({
-      adapterType: agent.adapterType,
+      adapterType: effectiveAdapterType,
       issueId,
       explicitRunScopedSkillKeys: runScopedMentionedSkillKeys,
     });
     const { resolvedConfig, secretKeys, secretManifest } = await resolveExecutionRunAdapterConfig({
       companyId: agent.companyId,
       agentId: agent.id,
-      adapterType: agent.adapterType,
+      adapterType: effectiveAdapterType,
       issueId,
       heartbeatRunId: run.id,
       environmentId: selectedEnvironmentForConfig?.id ?? null,
@@ -14300,7 +14400,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
     const latestAgentConfigRevision = await getLatestAgentConfigRevision(agent.companyId, agent.id);
     const sessionConfigMetadata = await buildEffectiveRunSessionConfigMetadata({
-      adapterType: agent.adapterType,
+      adapterType: effectiveAdapterType,
       effectiveAdapterConfig: runtimeConfig,
       agentRuntimeConfig: agent.runtimeConfig,
       modelProfile: modelProfileMetadata,
@@ -14373,11 +14473,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const taskSessionForRun = resetTaskSession ? null : taskSession;
     const previousSessionParams =
       explicitResumeSessionParams ??
-      (isCanonicalSessionIdForAdapter(agent.adapterType, explicitResumeSessionDisplayId)
+      (isCanonicalSessionIdForAdapter(effectiveAdapterType, explicitResumeSessionDisplayId)
         ? { sessionId: explicitResumeSessionDisplayId }
         : null) ??
       normalizeResumeParamsForAdapter(
-        agent.adapterType,
+        effectiveAdapterType,
         stripPaperclipSessionMetadataFromSessionParams(
           sessionCodec.deserialize(taskSessionForRun?.sessionParamsJson ?? null),
         ),
@@ -15425,7 +15525,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         });
       };
 
-      const adapter = getServerAdapter(agent.adapterType);
+      const adapter = getServerAdapter(effectiveAdapterType);
       const localAgentJwtScope =
         issueRef?.workMode === "skill_test"
           ? { kind: "skill_test" as const, issueId: issueRef.id }
@@ -15434,7 +15534,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ? createLocalAgentJwt(
           agent.id,
           agent.companyId,
-          agent.adapterType,
+          effectiveAdapterType,
           run.id,
           run.responsibleUserId,
           localAgentJwtScope,
@@ -15446,7 +15546,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             companyId: agent.companyId,
             agentId: agent.id,
             runId: run.id,
-            adapterType: agent.adapterType,
+            adapterType: effectiveAdapterType,
           },
           "local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY",
         );

@@ -20,6 +20,7 @@ import {
 } from "@paperclipai/adapter-claude-local/server";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { agentService } from "./agents.js";
+import { agentAllowsSubscriptionFailoverAssign } from "./subscription-failover.js";
 
 const LOGIN_LIFETIME_MS = 15 * 60 * 1000;
 const ACCOUNT_HIGH_WATER_PERCENT = 95;
@@ -177,6 +178,7 @@ export async function withClaudeAccountSelectionLock<T>(
 export async function selectFirstAvailableClaudeAccount(input: {
   accounts: SelectableClaudeAccount[];
   busyAccountIds?: Iterable<string>;
+  preferAvailableOnly?: boolean;
   readAuthStatus?: typeof readClaudeAuthStatus;
   readQuota?: typeof getQuotaWindows;
 }): Promise<FirstAvailableClaudeAccountSelection | null> {
@@ -215,7 +217,10 @@ export async function selectFirstAvailableClaudeAccount(input: {
   }
 
   const rank = { available: 0, unknown: 1, exhausted_fallback: 2 } as const;
-  candidates.sort((left, right) => {
+  const ranked = input.preferAvailableOnly
+    ? candidates.filter((candidate) => candidate.quotaState === "available")
+    : candidates;
+  ranked.sort((left, right) => {
     const rankDelta = rank[left.quotaState] - rank[right.quotaState];
     if (rankDelta) return rankDelta;
     const leftPressure = (left.usedPercent ?? 100) + left.activeRuns * ACTIVE_RUN_PRESSURE_PERCENT;
@@ -223,7 +228,7 @@ export async function selectFirstAvailableClaudeAccount(input: {
     if (leftPressure !== rightPressure) return leftPressure - rightPressure;
     return left.activeRuns - right.activeRuns;
   });
-  const selected = candidates[0];
+  const selected = ranked[0];
   return selected ? {
     accountId: selected.accountId,
     accountName: selected.accountName,
@@ -235,6 +240,7 @@ export async function selectFirstAvailableClaudeAccount(input: {
 export async function resolveFirstAvailableClaudeAccount(
   db: Db,
   companyId: string,
+  opts?: { preferAvailableOnly?: boolean },
 ): Promise<FirstAvailableClaudeAccountSelection | null> {
   const [accountRows, busyRows] = await Promise.all([
     db.select({ id: claudeAccounts.id, companyId: claudeAccounts.companyId, name: claudeAccounts.name })
@@ -247,6 +253,7 @@ export async function resolveFirstAvailableClaudeAccount(
   ]);
   return selectFirstAvailableClaudeAccount({
     accounts: accountRows,
+    preferAvailableOnly: opts?.preferAvailableOnly,
     busyAccountIds: busyRows.flatMap((row) => {
       const id = claudeAccountIdFromRunContext(row.contextSnapshot);
       return id ? [id] : [];
@@ -306,15 +313,20 @@ export function claudeAccountService(db: Db) {
           id: agents.id,
           name: agents.name,
           status: agents.status,
+          adapterType: agents.adapterType,
+          runtimeConfig: agents.runtimeConfig,
           claudeAccountMode: agents.claudeAccountMode,
           claudeAccountId: agents.claudeAccountId,
           adapterConfig: agents.adapterConfig,
         }).from(agents).where(and(
           eq(agents.companyId, companyId),
-          eq(agents.adapterType, "claude_local"),
           ne(agents.status, "terminated"),
         )).orderBy(asc(agents.name)),
       ]);
+
+      const claudeAgentRows = agentRows.filter((agent) =>
+        agentAllowsSubscriptionFailoverAssign(agent, "claude_local"),
+      );
 
       const accounts = await Promise.all(accountRows.map(async (account) => {
         const env = accountEnv(companyId, account.id);
@@ -330,7 +342,7 @@ export function claudeAccountService(db: Db) {
           authMethod: auth?.authMethod ?? null,
           planType: auth?.subscriptionType ?? null,
           lastAuthenticatedAt: account.lastAuthenticatedAt?.toISOString() ?? null,
-          assignedAgentIds: agentRows.filter((agent) => agent.claudeAccountId === account.id).map((agent) => agent.id),
+          assignedAgentIds: claudeAgentRows.filter((agent) => agent.claudeAccountId === account.id).map((agent) => agent.id),
           quota: await loadQuota(env, authenticated),
           login,
           createdAt: account.createdAt.toISOString(),
@@ -340,7 +352,7 @@ export function claudeAccountService(db: Db) {
 
       return {
         accounts,
-        agents: agentRows.map((agent) => {
+        agents: claudeAgentRows.map((agent) => {
           const blocker = hasConfiguredProvider(agent.adapterConfig);
           return {
             id: agent.id,
@@ -452,8 +464,8 @@ export function claudeAccountService(db: Db) {
     ) => {
       const agent = await agentsSvc.getById(agentId);
       if (!agent || agent.companyId !== companyId) throw notFound("Agent not found");
-      if (agent.adapterType !== "claude_local") {
-        throw unprocessable("Only Claude agents can be assigned to a Claude account");
+      if (!agentAllowsSubscriptionFailoverAssign(agent, "claude_local")) {
+        throw unprocessable("Only Claude agents (or agents with Codex↔Claude failover) can be assigned to a Claude account");
       }
       const blocker = hasConfiguredProvider(agent.adapterConfig);
       if (blocker) throw conflict(`Remove ${blocker} from this agent before assigning a Claude subscription account`);

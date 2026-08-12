@@ -21,6 +21,7 @@ import {
 } from "@paperclipai/adapter-codex-local/server";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { agentService } from "./agents.js";
+import { agentAllowsSubscriptionFailoverAssign } from "./subscription-failover.js";
 
 const LOGIN_LIFETIME_MS = 15 * 60 * 1000;
 const LOGIN_PROMPT_WAIT_MS = 15_000;
@@ -222,6 +223,7 @@ export async function withCodexAccountSelectionLock<T>(
 export async function selectFirstAvailableCodexAccount(input: {
   accounts: AutoSelectableCodexAccount[];
   busyAccountIds?: Iterable<string>;
+  preferAvailableOnly?: boolean;
   readAuthInfo?: typeof readCodexAuthInfo;
   fetchQuota?: typeof fetchCodexQuota;
 }): Promise<FirstAvailableCodexAccountSelection | null> {
@@ -279,7 +281,10 @@ export async function selectFirstAvailableCodexAccount(input: {
     unknown: 1,
     exhausted_fallback: 2,
   };
-  selections.sort((left, right) => {
+  const ranked = input.preferAvailableOnly
+    ? selections.filter((selection) => selection.quotaState === "available")
+    : selections;
+  ranked.sort((left, right) => {
     const exhaustedDelta = Number(left.quotaState === "exhausted_fallback")
       - Number(right.quotaState === "exhausted_fallback");
     if (exhaustedDelta !== 0) return exhaustedDelta;
@@ -292,7 +297,7 @@ export async function selectFirstAvailableCodexAccount(input: {
     if (leftPressure !== rightPressure) return leftPressure - rightPressure;
     return left.activeRuns - right.activeRuns;
   });
-  const selection = selections[0];
+  const selection = ranked[0];
   return selection
     ? {
         accountId: selection.accountId,
@@ -306,6 +311,7 @@ export async function selectFirstAvailableCodexAccount(input: {
 export async function resolveFirstAvailableCodexAccount(
   db: Db,
   companyId: string,
+  opts?: { preferAvailableOnly?: boolean },
 ): Promise<FirstAvailableCodexAccountSelection | null> {
   const [accountRows, busyRows] = await Promise.all([
     db
@@ -329,6 +335,7 @@ export async function resolveFirstAvailableCodexAccount(
   ]);
   return selectFirstAvailableCodexAccount({
     accounts: accountRows,
+    preferAvailableOnly: opts?.preferAvailableOnly,
     // Parse through the ORM value instead of extracting through a raw JSON SQL
     // expression. Some embedded-postgres/driver combinations return this
     // column serialized; the SQL path then yielded no reservations and every
@@ -503,6 +510,8 @@ export function codexAccountService(db: Db) {
             id: agents.id,
             name: agents.name,
             status: agents.status,
+            adapterType: agents.adapterType,
+            runtimeConfig: agents.runtimeConfig,
             codexAccountMode: agents.codexAccountMode,
             codexAccountId: agents.codexAccountId,
             adapterConfig: agents.adapterConfig,
@@ -510,11 +519,14 @@ export function codexAccountService(db: Db) {
           .from(agents)
           .where(and(
             eq(agents.companyId, companyId),
-            eq(agents.adapterType, "codex_local"),
             ne(agents.status, "terminated"),
           ))
           .orderBy(asc(agents.name)),
       ]);
+
+      const codexAgentRows = agentRows.filter((agent) =>
+        agentAllowsSubscriptionFailoverAssign(agent, "codex_local"),
+      );
 
       const accountSummaries = await Promise.all(accountRows.map(async (account) => {
         const auth = await readCodexAuthInfo(resolveCodexAccountHome(companyId, account.id));
@@ -546,7 +558,7 @@ export function codexAccountService(db: Db) {
 
       return {
         accounts: accountSummaries,
-        agents: agentRows.map((agent) => {
+        agents: codexAgentRows.map((agent) => {
           const apiKeyConfigured = hasConfiguredApiKey(agent.adapterConfig);
           return {
             id: agent.id,
@@ -667,8 +679,8 @@ export function codexAccountService(db: Db) {
     ) => {
       const agent = await agentsSvc.getById(agentId);
       if (!agent || agent.companyId !== companyId) throw notFound("Agent not found");
-      if (agent.adapterType !== "codex_local") {
-        throw unprocessable("Only Codex agents can be assigned to a Codex account");
+      if (!agentAllowsSubscriptionFailoverAssign(agent, "codex_local")) {
+        throw unprocessable("Only Codex agents (or agents with Codex↔Claude failover) can be assigned to a Codex account");
       }
       if (hasConfiguredApiKey(agent.adapterConfig)) {
         throw conflict("Remove OPENAI_API_KEY from this agent before assigning a ChatGPT account");

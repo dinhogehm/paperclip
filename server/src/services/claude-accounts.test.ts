@@ -77,4 +77,14 @@ describe("Claude account selection", () => {
     });
     expect(selection).toBeNull();
   });
+
+  it("returns null with preferAvailableOnly when only exhausted accounts exist", async () => {
+    const selection = await selectFirstAvailableClaudeAccount({
+      accounts: [{ id: "account-1", companyId: "company-1", name: "Exhausted" }],
+      preferAvailableOnly: true,
+      readAuthStatus: async () => authenticated,
+      readQuota: async () => quota(96),
+    });
+    expect(selection).toBeNull();
+  });
 });
