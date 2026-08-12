@@ -71,6 +71,8 @@ describe("CompanySettingsNav", () => {
     expect(getCompanySettingsTab("/PAP/company/export")).toBe("export");
     expect(getCompanySettingsTab("/company/import")).toBe("import");
     expect(getCompanySettingsTab("/PAP/company/import")).toBe("import");
+    expect(getCompanySettingsTab("/company/settings/codex-accounts")).toBe("codex-accounts");
+    expect(getCompanySettingsTab("/PAP/company/settings/claude-accounts")).toBe("claude-accounts");
     expect(getCompanySettingsTab("/company/settings/members")).toBe("members");
     expect(getCompanySettingsTab("/PAP/company/settings/members")).toBe("members");
     expect(getCompanySettingsTab("/company/settings/access")).toBe("members");
@@ -103,6 +105,8 @@ describe("CompanySettingsNav", () => {
           { value: "general", label: "General" },
           { value: "export", label: "Export" },
           { value: "import", label: "Import" },
+          { value: "codex-accounts", label: "Codex accounts" },
+          { value: "claude-accounts", label: "Claude accounts" },
           { value: "members", label: "Members" },
           { value: "invites", label: "Invites" },
           { value: "secrets", label: "Secrets" },
