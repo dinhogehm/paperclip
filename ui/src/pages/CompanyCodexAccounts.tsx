@@ -21,6 +21,7 @@ import { codexAccountsApi } from "@/api/codexAccounts";
 import { Button } from "@/components/ui/button";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useCompany } from "@/context/CompanyContext";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { queryKeys } from "@/lib/queryKeys";
 import { formatDateTime } from "@/lib/utils";
 
@@ -374,7 +375,7 @@ export function CompanyCodexAccounts() {
                           size="sm"
                           variant="outline"
                           onClick={async () => {
-                            await navigator.clipboard.writeText(account.login.userCode!);
+                            await copyTextToClipboard(account.login.userCode!);
                             setCopiedAccountId(account.id);
                           }}
                         >
