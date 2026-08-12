@@ -13,7 +13,11 @@ import type {
   ClaudeAccountsOverview,
 } from "@paperclipai/shared";
 import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
-import { getQuotaWindows, readClaudeAuthStatus } from "@paperclipai/adapter-claude-local/server";
+import {
+  getQuotaWindows,
+  readClaudeAuthStatus,
+  withClaudePrimaryQuotaWindows,
+} from "@paperclipai/adapter-claude-local/server";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { agentService } from "./agents.js";
 
@@ -254,16 +258,26 @@ async function loadQuota(env: NodeJS.ProcessEnv, authenticated: boolean): Promis
   if (!authenticated) return { status: "unauthenticated", windows: [], fetchedAt: null, error: null };
   const fetchedAt = new Date().toISOString();
   const result = await getQuotaWindows(env);
+  const windows = withClaudePrimaryQuotaWindows(result.windows).map((window) => ({
+    ...window,
+    detail: window.detail ?? null,
+  }));
   if (!result.ok) {
-    return { status: "unknown", windows: [], fetchedAt, error: result.error ?? "Usage is unavailable." };
+    return {
+      status: "unknown",
+      windows,
+      fetchedAt,
+      error: result.error ?? "Usage is unavailable.",
+    };
   }
+  const measured = windows.filter((window) => window.usedPercent != null);
   return {
-    status: result.windows.some((window) => window.usedPercent != null && window.usedPercent >= 100)
+    status: measured.some((window) => window.usedPercent != null && window.usedPercent >= 100)
       ? "exhausted"
-      : result.windows.length ? "available" : "unknown",
-    windows: result.windows.map((window) => ({ ...window, detail: window.detail ?? null })),
+      : measured.length ? "available" : "unknown",
+    windows,
     fetchedAt,
-    error: result.windows.length ? null : "Anthropic did not report usage windows for this account.",
+    error: measured.length ? null : result.error ?? "Anthropic did not report usage windows for this account.",
   };
 }
 

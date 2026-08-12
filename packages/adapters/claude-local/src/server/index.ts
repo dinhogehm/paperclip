@@ -24,6 +24,7 @@ export {
   fetchClaudeCliQuota,
   captureClaudeCliUsageText,
   parseClaudeCliUsageText,
+  withClaudePrimaryQuotaWindows,
   toPercent,
   fetchWithTimeout,
   claudeConfigDir,

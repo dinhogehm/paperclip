@@ -15,6 +15,7 @@ import {
 
 import {
   secondsToWindowLabel,
+  codexQuotaWindowLabel,
   readCodexAuthInfo,
   readCodexToken,
   fetchCodexQuota,
@@ -100,6 +101,14 @@ describe("secondsToWindowLabel", () => {
   it("labels windows beyond 7 days with actual day count", () => {
     expect(secondsToWindowLabel(1209600, "fallback")).toBe("14d"); // 14d
     expect(secondsToWindowLabel(2592000, "fallback")).toBe("30d"); // 30d
+  });
+});
+
+describe("codexQuotaWindowLabel", () => {
+  it("maps ~30-day windows to Monthly limit", () => {
+    expect(codexQuotaWindowLabel(2592000, "7d")).toBe("Monthly limit");
+    expect(codexQuotaWindowLabel(86400, "5h")).toBe("Daily limit");
+    expect(codexQuotaWindowLabel(604800, "7d")).toBe("Weekly limit");
   });
 });
 
@@ -322,32 +331,32 @@ describe("parseClaudeCliUsageText", () => {
 
     expect(parseClaudeCliUsageText(raw)).toEqual([
       {
-        label: "Current session",
+        label: "Session limit (5h)",
         usedPercent: 2,
         resetsAt: null,
         valueLabel: null,
         detail: "Resets 5pm (America/Chicago)",
       },
       {
-        label: "Current week (all models)",
+        label: "Weekly limit",
         usedPercent: 47,
         resetsAt: null,
         valueLabel: null,
         detail: "Resets Mar 18 at 7:59am (America/Chicago)",
       },
       {
-        label: "Current week (Sonnet only)",
+        label: "Monthly limit",
+        usedPercent: null,
+        resetsAt: null,
+        valueLabel: null,
+        detail: "Monthly extra usage not enabled • /extra-usage to enable",
+      },
+      {
+        label: "Weekly limit (Sonnet only)",
         usedPercent: 0,
         resetsAt: null,
         valueLabel: null,
         detail: "Resets Mar 18 at 8:59am (America/Chicago)",
-      },
-      {
-        label: "Extra usage",
-        usedPercent: null,
-        resetsAt: null,
-        valueLabel: null,
-        detail: "Extra usage not enabled • /extra-usage to enable",
       },
     ]);
   });
@@ -521,18 +530,23 @@ describe("fetchClaudeQuota", () => {
     await expect(fetchClaudeQuota("token")).rejects.toThrow("anthropic usage api returned 401");
   });
 
-  it("returns an empty array when all window fields are absent", async () => {
+  it("returns primary Session/Weekly/Monthly placeholders when all window fields are absent", async () => {
     mockFetch({});
     const windows = await fetchClaudeQuota("token");
-    expect(windows).toEqual([]);
+    expect(windows.map((w: QuotaWindow) => w.label)).toEqual([
+      "Session limit (5h)",
+      "Weekly limit",
+      "Monthly limit",
+    ]);
+    expect(windows.every((w: QuotaWindow) => w.valueLabel === "Unavailable")).toBe(true);
   });
 
   it("parses five_hour window with percentage-range utilization", async () => {
     mockFetch({ five_hour: { utilization: 34.0, resets_at: "2026-01-01T00:00:00Z" } });
     const windows = await fetchClaudeQuota("token");
-    expect(windows).toHaveLength(1);
+    expect(windows).toHaveLength(3);
     expect(windows[0]).toMatchObject({
-      label: "Current session",
+      label: "Session limit (5h)",
       usedPercent: 34,
       resetsAt: "2026-01-01T00:00:00Z",
     });
@@ -541,9 +555,8 @@ describe("fetchClaudeQuota", () => {
   it("parses seven_day window with percentage-range utilization", async () => {
     mockFetch({ seven_day: { utilization: 91.0, resets_at: null } });
     const windows = await fetchClaudeQuota("token");
-    expect(windows).toHaveLength(1);
-    expect(windows[0]).toMatchObject({
-      label: "Current week (all models)",
+    expect(windows[1]).toMatchObject({
+      label: "Weekly limit",
       usedPercent: 91,
       resetsAt: null,
     });
@@ -553,22 +566,26 @@ describe("fetchClaudeQuota", () => {
     mockFetch({ five_hour: { utilization: 0.4, resets_at: null } });
     const windows = await fetchClaudeQuota("token");
     expect(windows[0]).toMatchObject({
-      label: "Current session",
+      label: "Session limit (5h)",
       usedPercent: 40,
     });
   });
 
-  it("parses seven_day_sonnet and seven_day_opus windows", async () => {
+  it("parses seven_day_sonnet and seven_day_opus windows after primary meters", async () => {
     mockFetch({
       seven_day_sonnet: { utilization: 23.0, resets_at: null },
       seven_day_opus: { utilization: 85.0, resets_at: null },
     });
     const windows = await fetchClaudeQuota("token");
-    expect(windows).toHaveLength(2);
-    expect(windows[0]!.label).toBe("Current week (Sonnet only)");
-    expect(windows[0]!.usedPercent).toBe(23);
-    expect(windows[1]!.label).toBe("Current week (Opus only)");
-    expect(windows[1]!.usedPercent).toBe(85);
+    expect(windows.map((w: QuotaWindow) => w.label)).toEqual([
+      "Session limit (5h)",
+      "Weekly limit",
+      "Monthly limit",
+      "Weekly limit (Sonnet only)",
+      "Weekly limit (Opus only)",
+    ]);
+    expect(windows[3]!.usedPercent).toBe(23);
+    expect(windows[4]!.usedPercent).toBe(85);
   });
 
   it("sets usedPercent to null when utilization is absent", async () => {
@@ -577,7 +594,7 @@ describe("fetchClaudeQuota", () => {
     expect(windows[0]!.usedPercent).toBe(null);
   });
 
-  it("includes all four windows when all are present", async () => {
+  it("includes primary meters plus model-specific windows when present", async () => {
     mockFetch({
       five_hour: { utilization: 10.0, resets_at: null },
       seven_day: { utilization: 20.0, resets_at: null },
@@ -585,15 +602,16 @@ describe("fetchClaudeQuota", () => {
       seven_day_opus: { utilization: 40.0, resets_at: null },
     });
     const windows = await fetchClaudeQuota("token");
-    expect(windows).toHaveLength(4);
+    expect(windows).toHaveLength(5);
     const labels = windows.map((w: QuotaWindow) => w.label);
     expect(labels).toEqual([
-      "Current session",
-      "Current week (all models)",
-      "Current week (Sonnet only)",
-      "Current week (Opus only)",
+      "Session limit (5h)",
+      "Weekly limit",
+      "Monthly limit",
+      "Weekly limit (Sonnet only)",
+      "Weekly limit (Opus only)",
     ]);
-    expect(windows.map((w: QuotaWindow) => w.usedPercent)).toEqual([10, 20, 30, 40]);
+    expect(windows.map((w: QuotaWindow) => w.usedPercent)).toEqual([10, 20, null, 30, 40]);
   });
 
   it("parses extra usage when the OAuth response includes it", async () => {
@@ -606,11 +624,25 @@ describe("fetchClaudeQuota", () => {
     const windows = await fetchClaudeQuota("token");
     expect(windows).toEqual([
       {
-        label: "Extra usage",
+        label: "Session limit (5h)",
+        usedPercent: null,
+        resetsAt: null,
+        valueLabel: "Unavailable",
+        detail: "Usage not reported for this window",
+      },
+      {
+        label: "Weekly limit",
+        usedPercent: null,
+        resetsAt: null,
+        valueLabel: "Unavailable",
+        detail: "Usage not reported for this window",
+      },
+      {
+        label: "Monthly limit",
         usedPercent: null,
         resetsAt: null,
         valueLabel: "Not enabled",
-        detail: "Extra usage not enabled",
+        detail: "Monthly extra usage not enabled",
       },
     ]);
   });
@@ -625,9 +657,9 @@ describe("fetchClaudeQuota", () => {
       },
     });
     const windows = await fetchClaudeQuota("token");
-    expect(windows).toHaveLength(1);
-    expect(windows[0]).toMatchObject({
-      label: "Extra usage",
+    expect(windows).toHaveLength(3);
+    expect(windows[2]).toMatchObject({
+      label: "Monthly limit",
       usedPercent: 49,
       valueLabel: "$67.93 / $140.00",
       detail: "Monthly extra usage pool",
