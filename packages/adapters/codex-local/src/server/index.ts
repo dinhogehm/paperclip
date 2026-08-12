@@ -13,6 +13,8 @@ export { getConfigSchema } from "./config-schema.js";
 export {
   reconcileManagedCodexHome,
   isManagedCodexHomePath,
+  isManagedCodexAccountHomePath,
+  codexHomeHasUsableAuth,
   evaluateCodexCredentialReadiness,
   type ReconcileManagedCodexHomeInput,
   type ReconcileManagedCodexHomeResult,
@@ -32,6 +34,7 @@ export {
   fetchCodexRpcQuota,
   mapCodexRpcQuota,
   secondsToWindowLabel,
+  codexQuotaWindowLabel,
   fetchWithTimeout,
   codexHomeDir,
 } from "./quota.js";

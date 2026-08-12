@@ -52,6 +52,8 @@ const CONFIG_REVISION_FIELDS = [
   "reportsTo",
   "capabilities",
   "adapterType",
+  "codexAccountMode",
+  "codexAccountId",
   "adapterConfig",
   "runtimeConfig",
   "defaultEnvironmentId",
@@ -120,6 +122,8 @@ function buildConfigSnapshot(
     reportsTo: row.reportsTo,
     capabilities: row.capabilities,
     adapterType: row.adapterType,
+    codexAccountMode: row.codexAccountMode,
+    codexAccountId: row.codexAccountId,
     adapterConfig,
     runtimeConfig,
     defaultEnvironmentId: row.defaultEnvironmentId,
@@ -236,6 +240,14 @@ function configPatchFromSnapshot(snapshot: unknown): Partial<typeof agents.$infe
         ? snapshot.capabilities
         : null,
     adapterType: snapshot.adapterType,
+    codexAccountMode:
+      snapshot.codexAccountMode === "fixed" || snapshot.codexAccountMode === "first_available"
+        ? snapshot.codexAccountMode
+        : "host",
+    codexAccountId:
+      typeof snapshot.codexAccountId === "string" || snapshot.codexAccountId === null
+        ? snapshot.codexAccountId
+        : null,
     adapterConfig: isPlainRecord(snapshot.adapterConfig) ? snapshot.adapterConfig : {},
     runtimeConfig: isPlainRecord(snapshot.runtimeConfig) ? snapshot.runtimeConfig : {},
     defaultEnvironmentId:

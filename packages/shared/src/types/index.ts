@@ -279,6 +279,18 @@ export type {
   AdapterEnvironmentTestResult,
 } from "./agent.js";
 export type {
+  CodexAccount,
+  CodexAccountAgent,
+  CodexAccountAssignment,
+  CodexAccountLoginState,
+  CodexAccountLoginStatus,
+  CodexAccountMode,
+  CodexAccountQuota,
+  CodexAccountQuotaStatus,
+  CodexAccountQuotaWindow,
+  CodexAccountsOverview,
+} from "./codex-account.js";
+export type {
   AgentEligibilityAgent,
   AgentEligibilityLifecycleReason,
   AgentInvalidOrgChainAncestor,

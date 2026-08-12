@@ -15,6 +15,7 @@ import type {
 } from "../trust-policy.js";
 import type { AgentOrgChainHealth } from "../agent-eligibility.js";
 import type { AgentApiKeyScope } from "../validators/agent.js";
+import type { CodexAccountMode } from "./codex-account.js";
 
 export interface AgentPermissions extends Record<string, unknown> {
   canCreateAgents: boolean;
@@ -91,6 +92,8 @@ export interface Agent {
   reportsTo: string | null;
   capabilities: string | null;
   adapterType: AgentAdapterType;
+  codexAccountMode?: CodexAccountMode;
+  codexAccountId?: string | null;
   adapterConfig: Record<string, unknown>;
   runtimeConfig: AgentRuntimeConfig;
   defaultEnvironmentId?: string | null;

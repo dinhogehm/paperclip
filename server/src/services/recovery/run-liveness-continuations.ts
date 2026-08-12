@@ -4,6 +4,7 @@ import { agentWakeupRequests, agents, heartbeatRuns, issues } from "@paperclipai
 import type { RunLivenessState } from "@paperclipai/shared";
 import { withRecoveryModelProfileHint } from "./model-profile-hint.js";
 import { RECOVERY_REASON_KINDS } from "./origins.js";
+import { FINISH_SUCCESSFUL_RUN_HANDOFF_REASON } from "./successful-run-handoff.js";
 
 export const RUN_LIVENESS_CONTINUATION_REASON = RECOVERY_REASON_KINDS.runLivenessContinuation;
 export const DEFAULT_MAX_LIVENESS_CONTINUATION_ATTEMPTS = 2;
@@ -44,6 +45,16 @@ export type RunContinuationDecision =
 export function readContinuationAttempt(value: unknown): number {
   const numeric = typeof value === "number" ? value : Number.parseInt(String(value ?? ""), 10);
   return Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : 0;
+}
+
+function isCorrectiveDispositionHandoffRun(run: Pick<HeartbeatRunRow, "contextSnapshot">) {
+  const context = run.contextSnapshot;
+  return Boolean(
+    context &&
+      typeof context === "object" &&
+      !Array.isArray(context) &&
+      context.wakeReason === FINISH_SUCCESSFUL_RUN_HANDOFF_REASON,
+  );
 }
 
 export function buildRunLivenessContinuationIdempotencyKey(input: {
@@ -105,6 +116,9 @@ export function decideRunLivenessContinuation(input: {
   } = input;
   const maxAttempts = input.maxAttempts ?? DEFAULT_MAX_LIVENESS_CONTINUATION_ATTEMPTS;
 
+  if (isCorrectiveDispositionHandoffRun(run)) {
+    return { kind: "skip", reason: "corrective handoff run owns issue disposition recovery" };
+  }
   if (!livenessState || !ACTIONABLE_LIVENESS_STATES.has(livenessState)) {
     return { kind: "skip", reason: "liveness state is not actionable for continuation" };
   }

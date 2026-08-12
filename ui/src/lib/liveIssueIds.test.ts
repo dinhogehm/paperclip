@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { LiveRunForIssue } from "../api/heartbeats";
-import { collectLiveIssueIds, collectSubtreeLiveCounts } from "./liveIssueIds";
+import {
+  collectLiveAgentNamesByIssueId,
+  collectLiveIssueIds,
+  collectSubtreeLiveCounts,
+} from "./liveIssueIds";
 
 function liveRun(overrides: Partial<LiveRunForIssue>): LiveRunForIssue {
   return {
@@ -156,6 +160,30 @@ describe("collectLiveIssueIds", () => {
       { id: "issue-reopened", status: "in_progress", updatedAt: "2026-04-20T10:02:00.000Z" },
       { id: "issue-terminal", status: "done", updatedAt: "2026-04-20T10:02:00.000Z" },
     ])]).toEqual(["issue-reopened"]);
+  });
+});
+
+describe("collectLiveAgentNamesByIssueId", () => {
+  it("groups and deduplicates active agent names by issue", () => {
+    const namesByIssueId = collectLiveAgentNamesByIssueId([
+      liveRun({ id: "run-coder-1", issueId: "issue-1", agentName: "Coder" }),
+      liveRun({ id: "run-coder-2", issueId: "issue-1", agentName: "Coder" }),
+      liveRun({ id: "run-reviewer", issueId: "issue-1", agentName: "Reviewer", status: "queued" }),
+      liveRun({ id: "run-other", issueId: "issue-2", agentName: "Builder" }),
+      liveRun({ id: "run-done", issueId: "issue-1", agentName: "Finished", status: "succeeded" }),
+    ]);
+
+    expect(namesByIssueId.get("issue-1")).toEqual(["Coder", "Reviewer"]);
+    expect(namesByIssueId.get("issue-2")).toEqual(["Builder"]);
+  });
+
+  it("does not show agents on terminal issues with stale live runs", () => {
+    const namesByIssueId = collectLiveAgentNamesByIssueId(
+      [liveRun({ issueId: "issue-done", agentName: "Coder" })],
+      [{ id: "issue-done", status: "done" }],
+    );
+
+    expect(namesByIssueId.has("issue-done")).toBe(false);
   });
 });
 

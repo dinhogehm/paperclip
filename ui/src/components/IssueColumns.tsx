@@ -140,6 +140,7 @@ export function IssueColumnPicker({
 export function InboxIssueMetaLeading({
   issue,
   isLive,
+  activeAgentNames = [],
   subtreeLiveCount = 0,
   showSubtreeLiveChip = true,
   showStatus = true,
@@ -149,6 +150,7 @@ export function InboxIssueMetaLeading({
 }: {
   issue: Issue;
   isLive: boolean;
+  activeAgentNames?: string[];
   subtreeLiveCount?: number;
   showSubtreeLiveChip?: boolean;
   showStatus?: boolean;
@@ -156,6 +158,13 @@ export function InboxIssueMetaLeading({
   statusSlot?: ReactNode;
   checklistStepNumber?: number | string | null;
 }) {
+  const activeAgentLabel = activeAgentNames.length > 1
+    ? `${activeAgentNames[0]} +${activeAgentNames.length - 1}`
+    : activeAgentNames[0] ?? null;
+  const liveLabel = activeAgentNames.length > 0
+    ? `Live · ${activeAgentNames.join(", ")}`
+    : "Live";
+
   return (
     <>
       {showStatus ? (
@@ -174,11 +183,14 @@ export function InboxIssueMetaLeading({
         </span>
       ) : null}
       {isLive && (
-        <Badge variant="ghost"
+        <Badge
+          variant="ghost"
           className={cn(
             "px-1.5 sm:gap-1.5 sm:px-2",
             "bg-blue-500/10",
           )}
+          title={liveLabel}
+          aria-label={liveLabel}
         >
           <span className="relative flex h-2 w-2">
             <span className="absolute inline-flex h-full w-full animate-pulse rounded-full bg-blue-400 opacity-75" />
@@ -197,6 +209,19 @@ export function InboxIssueMetaLeading({
           >
             Live
           </span>
+          {activeAgentLabel ? (
+            <>
+              <span
+                className="hidden text-(length:--text-micro) text-blue-600/70 dark:text-blue-400/70 md:inline"
+                aria-hidden="true"
+              >
+                ·
+              </span>
+              <span className="hidden max-w-40 truncate text-(length:--text-micro) font-medium text-blue-600 dark:text-blue-400 md:inline-block">
+                {activeAgentLabel}
+              </span>
+            </>
+          ) : null}
         </Badge>
       )}
       {showSubtreeLiveChip && !isLive && subtreeLiveCount > 0 && (

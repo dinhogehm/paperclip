@@ -8,6 +8,7 @@ import {
   ensureSymlink,
   evaluateCodexCredentialReadiness,
   mergeManagedCodexMcpGateways,
+  isManagedCodexAccountHomePath,
   isManagedCodexHomePath,
   prepareManagedCodexHome,
   reconcileManagedCodexHome,
@@ -249,6 +250,24 @@ describe("isManagedCodexHomePath", () => {
     ).toBe(true);
   });
 
+  it("recognizes only the exact standalone account-home shape", () => {
+    const accountHome = path.join(
+      companyRoot,
+      "codex-accounts",
+      "account-2",
+      "codex-home",
+    );
+    expect(isManagedCodexAccountHomePath(env, "company-1", accountHome)).toBe(true);
+    expect(isManagedCodexAccountHomePath(env, "company-2", accountHome)).toBe(false);
+    expect(
+      isManagedCodexAccountHomePath(
+        env,
+        "company-1",
+        path.join(companyRoot, "agents", "agent-2", "codex-home"),
+      ),
+    ).toBe(false);
+  });
+
   it("treats a path outside the company tree as an external override", () => {
     expect(isManagedCodexHomePath(env, "company-1", "/home/dev/.codex")).toBe(false);
     expect(
@@ -396,6 +415,41 @@ describe("seedManagedCodexHome", () => {
 
       const written = JSON.parse(await fs.readFile(path.join(agentHome, "auth.json"), "utf8"));
       expect(written).toEqual({ OPENAI_API_KEY: "sk-test-123" });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves independent subscription auth in a company account home", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-account-seed-"));
+    try {
+      const sharedCodexHome = path.join(root, "shared-codex-home");
+      const paperclipHome = path.join(root, "paperclip-home");
+      const accountHome = path.join(
+        paperclipHome,
+        "instances",
+        "default",
+        "companies",
+        "company-1",
+        "codex-accounts",
+        "account-2",
+        "codex-home",
+      );
+      await fs.mkdir(sharedCodexHome, { recursive: true });
+      await fs.mkdir(accountHome, { recursive: true });
+      await fs.writeFile(path.join(sharedCodexHome, "auth.json"), '{"OPENAI_API_KEY":"shared"}', "utf8");
+      await fs.writeFile(path.join(accountHome, "auth.json"), '{"OPENAI_API_KEY":"independent"}', "utf8");
+
+      await seedManagedCodexHome(accountHome, {
+        CODEX_HOME: sharedCodexHome,
+        PAPERCLIP_HOME: paperclipHome,
+        PAPERCLIP_INSTANCE_ID: "default",
+      }, async () => {});
+
+      expect((await fs.lstat(path.join(accountHome, "auth.json"))).isSymbolicLink()).toBe(false);
+      expect(await fs.readFile(path.join(accountHome, "auth.json"), "utf8")).toBe(
+        '{"OPENAI_API_KEY":"independent"}',
+      );
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -599,13 +653,19 @@ describe("evaluateCodexCredentialReadiness", () => {
     );
     const managedCompanyHome = path.join(companyRoot, "codex-home");
     const managedAgentHome = path.join(companyRoot, "agents", "agent-1", "codex-home");
+    const managedAccountHome = path.join(
+      companyRoot,
+      "codex-accounts",
+      "account-1",
+      "codex-home",
+    );
     const env: NodeJS.ProcessEnv = {
       CODEX_HOME: sharedCodexHome,
       PAPERCLIP_HOME: paperclipHome,
       PAPERCLIP_INSTANCE_ID: "default",
     };
     await fs.mkdir(sharedCodexHome, { recursive: true });
-    return { root, sharedCodexHome, managedCompanyHome, managedAgentHome, env };
+    return { root, sharedCodexHome, managedCompanyHome, managedAgentHome, managedAccountHome, env };
   }
 
   async function writeUsableAuth(home: string) {
@@ -655,6 +715,31 @@ describe("evaluateCodexCredentialReadiness", () => {
         configuredApiKey: "",
       });
       expect(result).toMatchObject({ managed: true, authMode: "subscription", ready: true });
+    } finally {
+      await fs.rm(fx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not let an unauthenticated account profile inherit the shared host login", async () => {
+    const fx = await makeFixture();
+    try {
+      await writeUsableAuth(fx.sharedCodexHome);
+      const result = await evaluateCodexCredentialReadiness({
+        env: fx.env,
+        companyId: "company-1",
+        configuredCodexHome: fx.managedAccountHome,
+        configuredApiKey: "",
+      });
+      expect(result).toMatchObject({ managed: true, authMode: "subscription", ready: false });
+
+      await writeUsableAuth(fx.managedAccountHome);
+      const authenticated = await evaluateCodexCredentialReadiness({
+        env: fx.env,
+        companyId: "company-1",
+        configuredCodexHome: fx.managedAccountHome,
+        configuredApiKey: "",
+      });
+      expect(authenticated.ready).toBe(true);
     } finally {
       await fs.rm(fx.root, { recursive: true, force: true });
     }

@@ -70,6 +70,26 @@ export function collectLiveIssueIds(
   return ids;
 }
 
+export function collectLiveAgentNamesByIssueId(
+  liveRuns: readonly LiveRunForIssue[] | null | undefined,
+  issues?: readonly LiveIssueStatusNode[] | null,
+): Map<string, string[]> {
+  const namesByIssueId = new Map<string, string[]>();
+  const statusByIssueId = collectIssueStatusById(issues);
+
+  for (const run of liveRuns ?? []) {
+    const issueId = run.issueId?.trim();
+    const agentName = run.agentName.trim();
+    if (!issueId || !agentName || !isLiveIssueRun(run, statusByIssueId.get(issueId))) continue;
+
+    const names = namesByIssueId.get(issueId) ?? [];
+    if (!names.includes(agentName)) names.push(agentName);
+    namesByIssueId.set(issueId, names);
+  }
+
+  return namesByIssueId;
+}
+
 /**
  * Minimal tree node shape needed to roll live descendants up to their ancestors.
  * Both list and inbox issue objects satisfy this.

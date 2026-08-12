@@ -413,6 +413,34 @@ For `codex_local`, Paperclip assigns new and updated agents an isolated Codex ho
 
 - `~/.paperclip/instances/default/companies/<company-id>/agents/<agent-id>/codex-home`
 
+Company Settings → Codex accounts can also create multiple isolated ChatGPT
+subscription profiles. Each profile stores its Codex authentication state at:
+
+- `~/.paperclip/instances/default/companies/<company-id>/codex-accounts/<account-id>/codex-home`
+
+Paperclip persists only the account label and agent assignment in PostgreSQL.
+Authentication uses the Codex device-code flow in a pseudo-terminal, and the
+one-time code is kept in memory only for the active login. After authentication,
+assign the profile to one or more `codex_local` agents from the same settings
+page, or choose `First available account (automatic)`. Automatic selection checks
+authenticated profiles at every run boundary, prefers the greatest quota
+headroom with bounded pressure for live reservations, and stops selecting a
+profile at the 95% high-water mark while another usable profile exists. A
+transient quota-probe failure falls back to an authenticated profile instead of
+stopping the queue; the existing provider-quota retry path handles the case where
+every account is temporarily exhausted. An agent with an explicit `OPENAI_API_KEY`
+binding cannot
+use a subscription profile until that binding is removed.
+
+The same settings page shows live usage for every authenticated profile.
+Paperclip derives each label from the provider-reported window duration (for
+example 5-hour, daily, or weekly), shows percent available and used, renders the
+provider reset time in the browser's local timezone, and refreshes the snapshot
+every minute. It shows only windows currently reported for that profile rather
+than inventing an absent daily or weekly limit. Quota polling errors are shown
+as a retryable unknown state without exposing tokens or provider response
+bodies.
+
 Paperclip also persists an empty `OPENAI_API_KEY` override for those agents so a host-level `OPENAI_API_KEY` cannot leak into Codex runs through process inheritance. If an operator explicitly configures `adapterConfig.env.CODEX_HOME`, it must not point at the shared company `codex-home`, `$CODEX_HOME`, or `~/.codex`.
 
 If the `codex` CLI is not installed or not on `PATH`, `codex_local` agent runs fail at execution time with a clear adapter error. Quota polling uses a short-lived `codex app-server` subprocess: when `codex` cannot be spawned, that provider reports `ok: false` in aggregated quota results and the API server keeps running (it must not exit on a missing binary).

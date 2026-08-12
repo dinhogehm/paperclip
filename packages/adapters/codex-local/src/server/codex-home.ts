@@ -140,6 +140,32 @@ export function isManagedCodexHomePath(
 }
 
 /**
+ * True when `homePath` is a standalone subscription profile created from
+ * Company Settings. These homes are Paperclip-owned, but their auth.json must
+ * never be replaced with the host account symlink.
+ */
+export function isManagedCodexAccountHomePath(
+  env: NodeJS.ProcessEnv,
+  companyId: string | undefined,
+  homePath: string,
+): boolean {
+  const instanceRoot = resolvePaperclipInstanceRootForAdapter({
+    homeDir: nonEmpty(env.PAPERCLIP_HOME) ?? undefined,
+    instanceId: nonEmpty(env.PAPERCLIP_INSTANCE_ID) ?? undefined,
+    env,
+  });
+  const relative = path.relative(path.resolve(instanceRoot), path.resolve(homePath));
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return false;
+  const segments = relative.split(path.sep);
+  return segments.length === 5
+    && segments[0] === "companies"
+    && (!companyId || segments[1] === companyId)
+    && segments[2] === "codex-accounts"
+    && segments[3]!.length > 0
+    && segments[4] === "codex-home";
+}
+
+/**
  * True when the Codex home has a usable `auth.json`. Uses `fs.access` (follows
  * symlinks), so a dangling auth symlink whose source has been removed counts as
  * no usable credentials.
@@ -585,6 +611,7 @@ export async function seedManagedCodexHome(
 
   const sourceHome = resolveSharedCodexHomeDir(env);
   const seedFromShared = path.resolve(sourceHome) !== path.resolve(targetHome);
+  const standaloneAccountHome = isManagedCodexAccountHomePath(env, undefined, targetHome);
 
   await fs.mkdir(targetHome, { recursive: true });
 
@@ -592,7 +619,7 @@ export async function seedManagedCodexHome(
   // run has no apiKey, remove it so the chatgpt-mode symlink can be restored.
   // Without this cleanup, ensureSymlink bails on a non-symlink and Codex keeps
   // authenticating with the stale key after it is removed from configuration.
-  if (!apiKey && seedFromShared) {
+  if (!apiKey && seedFromShared && !standaloneAccountHome) {
     const authPath = path.join(targetHome, "auth.json");
     const existing = await fs.lstat(authPath).catch(() => null);
     if (existing && !existing.isSymbolicLink()) {
@@ -601,10 +628,12 @@ export async function seedManagedCodexHome(
   }
 
   if (seedFromShared) {
-    for (const name of SYMLINKED_SHARED_FILES) {
-      const source = path.join(sourceHome, name);
-      if (!(await pathExists(source))) continue;
-      await ensureSymlink(path.join(targetHome, name), source);
+    if (!standaloneAccountHome) {
+      for (const name of SYMLINKED_SHARED_FILES) {
+        const source = path.join(sourceHome, name);
+        if (!(await pathExists(source))) continue;
+        await ensureSymlink(path.join(targetHome, name), source);
+      }
     }
 
     for (const name of COPIED_SHARED_FILES) {
@@ -772,6 +801,11 @@ export async function evaluateCodexCredentialReadiness(
     configuredCodexHome != null && isManagedCodexHomePath(env, input.companyId, configuredCodexHome);
   const effectiveHomeIsManaged = configuredCodexHome == null || configuredHomeIsManaged;
   const effectiveHome = configuredCodexHome ?? resolveManagedCodexHomeDir(env, input.companyId);
+  const standaloneAccountHome = isManagedCodexAccountHomePath(
+    env,
+    input.companyId,
+    effectiveHome,
+  );
 
   if (!effectiveHomeIsManaged) {
     // Genuine external override: Paperclip never seeds or inspects it.
@@ -788,8 +822,9 @@ export async function evaluateCodexCredentialReadiness(
     return { managed: true, authMode: "api", ready: true, effectiveHome, sharedSourceHome };
   }
 
-  const ready =
-    (await codexHomeHasUsableAuth(effectiveHome)) ||
-    (await codexHomeHasUsableAuth(sharedSourceHome));
+  const ready = standaloneAccountHome
+    ? await codexHomeHasUsableAuth(effectiveHome)
+    : (await codexHomeHasUsableAuth(effectiveHome)) ||
+      (await codexHomeHasUsableAuth(sharedSourceHome));
   return { managed: true, authMode: "subscription", ready, effectiveHome, sharedSourceHome };
 }

@@ -1034,6 +1034,29 @@ describe("InboxIssueMetaLeading", () => {
       root.unmount();
     });
   });
+
+  it("identifies the active agent and summarizes concurrent agents", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <InboxIssueMetaLeading
+          issue={createIssue()}
+          isLive
+          activeAgentNames={["Engenheiro de Entrega", "Revisor de Código"]}
+        />,
+      );
+    });
+
+    const liveBadge = container.querySelector('[data-slot="badge"]');
+    expect(liveBadge?.textContent).toContain("Engenheiro de Entrega +1");
+    expect(liveBadge?.getAttribute("title")).toBe("Live · Engenheiro de Entrega, Revisor de Código");
+    expect(liveBadge?.getAttribute("aria-label")).toBe("Live · Engenheiro de Entrega, Revisor de Código");
+
+    act(() => {
+      root.unmount();
+    });
+  });
 });
 
 describe("InboxIssueTrailingColumns", () => {
