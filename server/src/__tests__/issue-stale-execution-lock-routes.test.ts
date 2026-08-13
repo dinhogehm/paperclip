@@ -8,8 +8,11 @@ import {
   agents,
   companies,
   createDb,
+  documentRevisions,
+  documents,
   heartbeatRuns,
   issueComments,
+  issueDocuments,
   issueRelations,
   issues,
 } from "@paperclipai/db";
@@ -44,6 +47,9 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
     await db.delete(issueComments);
     await db.delete(issueRelations);
     await db.delete(activityLog);
+    await db.delete(documentRevisions);
+    await db.delete(issueDocuments);
+    await db.delete(documents);
     await db.delete(issues);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
@@ -147,7 +153,8 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
       executionAgentNameKey: "codexcoder",
       executionLockedAt: new Date(),
     });
-    await db.update(heartbeatRuns)
+    await db
+      .update(heartbeatRuns)
       .set({ contextSnapshot: { issueId } })
       .where(eq(heartbeatRuns.id, currentRunId));
 
@@ -408,6 +415,85 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
       .from(activityLog)
       .where(eq(activityLog.action, "issue.checked_out"));
     expect(checkoutActivity).toHaveLength(0);
+  });
+
+  it("validates checkout and document requests without bypassing run authorization", async () => {
+    const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Checkout and document validation",
+      status: "todo",
+      priority: "high",
+      assigneeAgentId: agentId,
+    });
+    await db.update(heartbeatRuns)
+      .set({ contextSnapshot: { issueId } })
+      .where(eq(heartbeatRuns.id, currentRunId));
+
+    const app = createApp(agentActor(companyId, agentId, currentRunId));
+    const emptyCheckout = await request(app)
+      .post(`/api/issues/${issueId}/checkout`)
+      .send({});
+
+    expect(emptyCheckout.status, JSON.stringify(emptyCheckout.body)).toBe(400);
+    expect(emptyCheckout.body.error).toBe("Validation error");
+    expect(emptyCheckout.body.details.map((detail: { path: string[] }) => detail.path[0])).toEqual([
+      "agentId",
+      "expectedStatuses",
+    ]);
+
+    await request(app)
+      .post(`/api/issues/${issueId}/checkout`)
+      .send({ agentId, expectedStatuses: ["todo"] })
+      .expect(200);
+    const comment = await request(app)
+      .post(`/api/issues/${issueId}/comments`)
+      .send({ body: "Checkout linked to the run." });
+    expect(comment.status, JSON.stringify(comment.body)).toBe(201);
+    await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({ title: "Checkout linked and mutable" })
+      .expect(200);
+
+    const invalidDocument = await request(app)
+      .put(`/api/issues/${issueId}/documents/plan`)
+      .send({ title: "Plan", content: "Legacy shape" });
+
+    expect(invalidDocument.status, JSON.stringify(invalidDocument.body)).toBe(400);
+    expect(invalidDocument.body.error).toBe("Validation error");
+    expect(invalidDocument.body.details.map((detail: { path: string[] }) => detail.path[0])).toEqual([
+      "format",
+      "body",
+    ]);
+
+    const created = await request(app)
+      .put(`/api/issues/${issueId}/documents/plan`)
+      .send({ title: "Plan", format: "markdown", body: "First revision" })
+      .expect(201);
+    const updated = await request(app)
+      .put(`/api/issues/${issueId}/documents/plan`)
+      .send({
+        title: "Plan",
+        format: "markdown",
+        body: "Second revision",
+        baseRevisionId: created.body.latestRevisionId,
+      })
+      .expect(200);
+    const readBack = await request(app)
+      .get(`/api/issues/${issueId}/documents/plan?includeAnnotations=false`)
+      .expect(200);
+
+    expect(updated.body.body).toBe("Second revision");
+    expect(readBack.body.body).toBe("Second revision");
+
+    const missingRun = await request(createApp(agentActor(companyId, agentId, "")))
+      .put(`/api/issues/${issueId}/documents/plan`)
+      .send({ title: "Plan", content: "Still invalid" });
+
+    expect(missingRun.status, JSON.stringify(missingRun.body)).toBe(401);
+    expect(missingRun.body.error).toBe("Agent run id required");
   });
 
   it("restricts admin force-release to board users with company access and writes an audit event", async () => {
