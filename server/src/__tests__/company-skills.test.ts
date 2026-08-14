@@ -139,23 +139,24 @@ describe("project workspace skill discovery", () => {
       workspaceName: "Main",
       workspaceCwd: workspace,
     });
+    const canonicalWorkspace = await fs.realpath(workspace);
 
     expect(discovered).toEqual([
-      { skillDir: path.resolve(workspace), directoryRoot: ".", relativePath: ".", inventoryMode: "project_root" },
+      { skillDir: canonicalWorkspace, directoryRoot: ".", relativePath: ".", inventoryMode: "project_root" },
       {
-        skillDir: path.resolve(workspace, ".agents", "skills", "release"),
+        skillDir: path.join(canonicalWorkspace, ".agents", "skills", "release"),
         directoryRoot: ".agents/skills",
         relativePath: ".agents/skills/release",
         inventoryMode: "full",
       },
       {
-        skillDir: path.resolve(workspace, "skills", ".system", "paperclip"),
+        skillDir: path.join(canonicalWorkspace, "skills", ".system", "paperclip"),
         directoryRoot: "skills/.system",
         relativePath: "skills/.system/paperclip",
         inventoryMode: "full",
       },
       {
-        skillDir: path.resolve(workspace, "skills", "find-skills"),
+        skillDir: path.join(canonicalWorkspace, "skills", "find-skills"),
         directoryRoot: "skills",
         relativePath: "skills/find-skills",
         inventoryMode: "full",
@@ -377,10 +378,11 @@ describe("project workspace skill discovery", () => {
       workspaceName: "Main",
       workspaceCwd: workspace,
     }, ["content/specialists/editorial"]);
+    const canonicalWorkspace = await fs.realpath(workspace);
 
     expect(discovered).toEqual([
       {
-        skillDir: path.resolve(workspace, "content", "specialists", "editorial"),
+        skillDir: path.join(canonicalWorkspace, "content", "specialists", "editorial"),
         directoryRoot: "content/specialists",
         relativePath: "content/specialists/editorial",
         inventoryMode: "full",
