@@ -16,6 +16,9 @@ const mockApi = vi.hoisted(() => ({
 const mockSetBreadcrumbs = vi.hoisted(() => vi.fn());
 
 vi.mock("@/api/codexAccounts", () => ({ codexAccountsApi: mockApi }));
+vi.mock("@/lib/router", () => ({
+  Link: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,
+}));
 vi.mock("@/context/BreadcrumbContext", () => ({
   useBreadcrumbs: () => ({ setBreadcrumbs: mockSetBreadcrumbs }),
 }));
@@ -163,7 +166,7 @@ describe("CompanyCodexAccounts", () => {
     vi.clearAllMocks();
   });
 
-  it("shows isolated accounts, device-code login, and agent assignment", async () => {
+  it("shows isolated accounts and device-code login without embedding assignments", async () => {
     const root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
@@ -183,19 +186,8 @@ describe("CompanyCodexAccounts", () => {
     expect(container.textContent).toContain("Weekly limit");
     expect(container.querySelector('time[datetime="2026-08-10T22:30:00.000Z"]')).not.toBeNull();
     expect(container.querySelector('a[href="https://auth.openai.com/codex/device"]')).not.toBeNull();
-    const assignment = container.querySelector(
-      'select[aria-label="Codex account for Engenheiro de Entrega"]',
-    ) as HTMLSelectElement | null;
-    expect(assignment?.value).toBe("account-1");
-    expect(Array.from(assignment?.options ?? []).map((option) => option.textContent)).toContain(
-      "Pro principal",
-    );
-    expect(Array.from(assignment?.options ?? []).map((option) => option.textContent)).toContain(
-      "First available account (automatic)",
-    );
-    expect(Array.from(assignment?.options ?? []).map((option) => option.textContent)).not.toContain(
-      "Pro secundária",
-    );
+    expect(container.textContent).not.toContain("Agent assignments");
+    expect(container.querySelector('select[aria-label="Codex account for Engenheiro de Entrega"]')).toBeNull();
 
     const authenticate = Array.from(container.querySelectorAll("button")).find(
       (button) => button.textContent?.trim() === "Reauthenticate",
@@ -204,17 +196,6 @@ describe("CompanyCodexAccounts", () => {
       authenticate?.click();
     });
     await waitFor(() => expect(mockApi.startLogin).toHaveBeenCalledWith("company-1", "account-1"));
-
-    await act(async () => {
-      if (!assignment) return;
-      assignment.value = "__first_available__";
-      assignment.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    await waitFor(() => expect(mockApi.assignAgent).toHaveBeenCalledWith(
-      "company-1",
-      "agent-1",
-      { mode: "first_available", accountId: null },
-    ));
 
     await act(async () => root.unmount());
   });

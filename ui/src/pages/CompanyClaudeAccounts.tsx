@@ -1,15 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, CheckCircle2, CircleAlert, ExternalLink, KeyRound, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
-import type { ClaudeAccountAssignment } from "@paperclipai/shared";
+import { CheckCircle2, CircleAlert, ExternalLink, KeyRound, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { claudeAccountsApi } from "@/api/claudeAccounts";
 import { Button } from "@/components/ui/button";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useCompany } from "@/context/CompanyContext";
 import { queryKeys } from "@/lib/queryKeys";
 import { formatDateTime } from "@/lib/utils";
-
-const FIRST_AVAILABLE_VALUE = "__first_available__";
 
 export function CompanyClaudeAccounts() {
   const { selectedCompany, selectedCompanyId } = useCompany();
@@ -52,19 +49,10 @@ export function CompanyClaudeAccounts() {
       loginMutation.mutate(account.id);
     },
   });
-  const assignmentMutation = useMutation({
-    mutationFn: ({ agentId, assignment }: { agentId: string; assignment: ClaudeAccountAssignment }) =>
-      claudeAccountsApi.assignAgent(selectedCompanyId!, agentId, assignment),
-    onSuccess: invalidate,
-  });
   const removeMutation = useMutation({
     mutationFn: (accountId: string) => claudeAccountsApi.remove(selectedCompanyId!, accountId),
     onSuccess: invalidate,
   });
-  const authenticatedAccounts = useMemo(
-    () => accountsQuery.data?.accounts.filter((account) => account.authenticated) ?? [],
-    [accountsQuery.data?.accounts],
-  );
 
   if (!selectedCompanyId || !selectedCompany) {
     return <div className="text-sm text-muted-foreground">Select a company to manage Claude accounts.</div>;
@@ -178,34 +166,6 @@ export function CompanyClaudeAccounts() {
           : null)}
       </section>
 
-      <section className="space-y-3" aria-labelledby="claude-agent-assignments-heading">
-        <div>
-          <h2 id="claude-agent-assignments-heading" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Agent assignments</h2>
-          <p className="mt-1 text-xs text-muted-foreground">Choose the shared host session, one fixed profile, or the first account with quota available.</p>
-        </div>
-        <div className="divide-y divide-border rounded-md border border-border">
-          {(accountsQuery.data?.agents.length ?? 0) === 0 ? <p className="p-4 text-sm text-muted-foreground">No active Claude agents in this company.</p> : accountsQuery.data?.agents.map((agent) => (
-            <div key={agent.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex min-w-0 items-center gap-2"><Bot className="h-4 w-4 shrink-0 text-muted-foreground" /><div className="min-w-0"><p className="truncate text-sm font-medium">{agent.name}</p><p className="text-xs text-muted-foreground">{agent.subscriptionAccountBlocker ?? agent.status}</p></div></div>
-              <select
-                aria-label={`Claude account for ${agent.name}`}
-                className="rounded-md border border-border bg-background px-2.5 py-1.5 text-sm outline-none sm:w-72"
-                value={agent.claudeAccountMode === "first_available" ? FIRST_AVAILABLE_VALUE : agent.claudeAccountMode === "fixed" ? agent.claudeAccountId ?? "" : ""}
-                disabled={!agent.canUseSubscriptionAccount || assignmentMutation.isPending}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  assignmentMutation.mutate({ agentId: agent.id, assignment: value === FIRST_AVAILABLE_VALUE ? { mode: "first_available", accountId: null } : value ? { mode: "fixed", accountId: value } : { mode: "host", accountId: null } });
-                }}
-              >
-                <option value="">Host account (shared session)</option>
-                <option value={FIRST_AVAILABLE_VALUE}>First available account (automatic)</option>
-                {authenticatedAccounts.map((account) => <option key={account.id} value={account.id}>{account.name}</option>)}
-              </select>
-            </div>
-          ))}
-        </div>
-        {assignmentMutation.isError ? <p className="text-xs text-destructive">{assignmentMutation.error.message}</p> : null}
-      </section>
     </div>
   );
 }

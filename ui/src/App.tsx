@@ -50,6 +50,7 @@ import { BoardChat } from "./pages/BoardChat";
 import { CompanySettings } from "./pages/CompanySettings";
 import { CompanyCodexAccounts } from "./pages/CompanyCodexAccounts";
 import { CompanyClaudeAccounts } from "./pages/CompanyClaudeAccounts";
+import { CompanyAgentAssignments } from "./pages/CompanyAgentAssignments";
 import { CompanyEnvironments } from "./pages/CompanyEnvironments";
 import { BootstrapSetupUxLab } from "./pages/BootstrapSetupUxLab";
 import { ResponsibleUserDenialUxLab } from "./pages/ResponsibleUserDenialUxLab";
@@ -113,6 +114,7 @@ function boardRoutes() {
       <Route path="company/settings" element={<CompanySettings />} />
       <Route path="company/settings/codex-accounts" element={<CompanyCodexAccounts />} />
       <Route path="company/settings/claude-accounts" element={<CompanyClaudeAccounts />} />
+      <Route path="company/settings/agent-assignments" element={<CompanyAgentAssignments />} />
       <Route path="company/settings/environments" element={<Navigate to="/company/settings/instance/environments" replace />} />
       <Route path="company/settings/cloud-upstream" element={<Navigate to="/company/export" replace />} />
       <Route path="company/settings/members" element={<CompanyAccess />} />
