@@ -8,7 +8,7 @@ const companyId = "11111111-1111-4111-8111-111111111111";
 const accountId = "22222222-2222-4222-8222-222222222222";
 const agentId = "33333333-3333-4333-8333-333333333333";
 const mockService = vi.hoisted(() => ({
-  list: vi.fn(), create: vi.fn(), startLogin: vi.fn(), assignAgent: vi.fn(), remove: vi.fn(),
+  list: vi.fn(), create: vi.fn(), startLogin: vi.fn(), submitLoginCode: vi.fn(), assignAgent: vi.fn(), remove: vi.fn(),
 }));
 const mockLogActivity = vi.hoisted(() => vi.fn());
 
@@ -37,7 +37,12 @@ describe("Claude account routes", () => {
     mockService.list.mockResolvedValue({ accounts: [], agents: [] });
     mockService.create.mockResolvedValue({ id: accountId, companyId, name: "Max 2" });
     mockService.startLogin.mockResolvedValue({
-      status: "waiting_for_user", verificationUrl: "https://claude.ai/login", startedAt: null, expiresAt: null, error: null,
+      status: "waiting_for_user", verificationUrl: "https://claude.ai/login", acceptsBrowserCode: true,
+      browserCodeSubmitted: false, startedAt: null, expiresAt: null, error: null,
+    });
+    mockService.submitLoginCode.mockResolvedValue({
+      status: "waiting_for_user", verificationUrl: "https://claude.ai/login", acceptsBrowserCode: false,
+      browserCodeSubmitted: true, startedAt: null, expiresAt: null, error: null,
     });
     mockService.assignAgent.mockResolvedValue({ id: agentId });
   });
@@ -53,6 +58,31 @@ describe("Claude account routes", () => {
       action: "claude_account.login_started", details: { status: "waiting_for_user" },
     }));
     expect(JSON.stringify(mockLogActivity.mock.calls)).not.toContain("claude.ai/login");
+  });
+
+  it("forwards code#state to the active login without persisting it in activity", async () => {
+    const browserCode = "example-code#example-state";
+    const response = await request(app())
+      .post(`/api/companies/${companyId}/claude-accounts/${accountId}/login/code`)
+      .send({ browserCode })
+      .expect(200);
+
+    expect(mockService.submitLoginCode).toHaveBeenCalledWith(companyId, accountId, browserCode);
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "claude_account.login_code_submitted",
+      details: { status: "waiting_for_user" },
+    }));
+    expect(JSON.stringify(mockLogActivity.mock.calls)).not.toContain(browserCode);
+    expect(JSON.stringify(response.body)).not.toContain(browserCode);
+  });
+
+  it("rejects malformed browser codes before they reach the login process", async () => {
+    await request(app())
+      .post(`/api/companies/${companyId}/claude-accounts/${accountId}/login/code`)
+      .send({ browserCode: "missing-state" })
+      .expect(400);
+
+    expect(mockService.submitLoginCode).not.toHaveBeenCalled();
   });
 
   it("accepts automatic first-available selection", async () => {

@@ -7,6 +7,13 @@ import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 
 const createClaudeAccountSchema = z.object({ name: z.string().trim().min(1).max(80) });
 
+const submitClaudeLoginCodeSchema = z.object({
+  browserCode: z.string().trim().min(3).max(4096).refine(
+    (value) => /^[^\s#]+#[^\s#]+$/.test(value),
+    "Enter the complete code#state value shown by Claude",
+  ),
+});
+
 const assignClaudeAccountSchema = z.object({
   mode: z.enum(["host", "fixed", "first_available"]).optional(),
   accountId: z.string().uuid().nullable().optional(),
@@ -72,6 +79,32 @@ export function claudeAccountRoutes(db: Db) {
     });
     res.json(login);
   });
+
+  router.post(
+    "/companies/:companyId/claude-accounts/:accountId/login/code",
+    validate(submitClaudeLoginCodeSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const accountId = req.params.accountId as string;
+      assertAccess(req, companyId);
+      const login = await service.submitLoginCode(companyId, accountId, req.body.browserCode);
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
+        action: "claude_account.login_code_submitted",
+        entityType: "claude_account",
+        entityId: accountId,
+        // Never include the browser code in activity details.
+        details: { status: login.status },
+      });
+      res.json(login);
+    },
+  );
 
   router.put(
     "/companies/:companyId/claude-accounts/agents/:agentId",

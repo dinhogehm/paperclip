@@ -449,7 +449,9 @@ CLI session at:
 
 Paperclip starts `claude auth login --claudeai` with both
 `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR` pointed at that
-profile. A fixed assignment injects those paths into every run. `First
+profile. For remote installs, the settings page accepts the one-time
+`code#state` value shown by Claude and forwards it directly to the active CLI
+process; Paperclip does not persist or return that value. A fixed assignment injects those paths into every run. `First
 available account (automatic)` selects at each run boundary, considers current
 session and weekly usage windows, accounts for queued and running reservations,
 and avoids a profile at or above the 95% high-water mark when another profile

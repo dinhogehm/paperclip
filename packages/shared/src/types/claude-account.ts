@@ -17,9 +17,15 @@ export type ClaudeAccountLoginStatus =
 export interface ClaudeAccountLoginState {
   status: ClaudeAccountLoginStatus;
   verificationUrl: string | null;
+  acceptsBrowserCode: boolean;
+  browserCodeSubmitted: boolean;
   startedAt: string | null;
   expiresAt: string | null;
   error: string | null;
+}
+
+export interface ClaudeAccountLoginCodeSubmission {
+  browserCode: string;
 }
 
 export interface ClaudeAccountAgent {

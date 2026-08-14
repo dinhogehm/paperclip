@@ -213,7 +213,10 @@ CLI credentials remain in a Paperclip-managed local profile. Fixed assignments
 set both Claude config and secure-storage directories. Automatic assignments
 resolve an authenticated Claude.ai subscription profile for each run, include
 live run reservations in selection pressure, and expose provider quota windows
-without storing tokens or raw provider responses.
+without storing tokens or raw provider responses. Remote browser authentication
+forwards the one-time `code#state` value only to the active Claude CLI process,
+after matching it to that session's OAuth state; the value is never persisted or
+returned by the API.
 
 ## 7.3 `agent_api_keys`
 

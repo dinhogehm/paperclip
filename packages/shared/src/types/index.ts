@@ -305,6 +305,7 @@ export type {
   ClaudeAccount,
   ClaudeAccountAgent,
   ClaudeAccountAssignment,
+  ClaudeAccountLoginCodeSubmission,
   ClaudeAccountLoginState,
   ClaudeAccountLoginStatus,
   ClaudeAccountMode,
