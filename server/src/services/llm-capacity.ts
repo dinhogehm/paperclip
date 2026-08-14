@@ -1,5 +1,17 @@
 export const MANAGED_ACCOUNT_SESSION_LIMIT = 2;
-export const GLOBAL_LLM_SESSION_LIMIT = 4;
+export const GLOBAL_LLM_SESSION_LIMIT_ENV = "PAPERCLIP_GLOBAL_LLM_SESSION_LIMIT";
+export const DEFAULT_GLOBAL_LLM_SESSION_LIMIT = 4;
+
+export function resolveGlobalLlmSessionLimit(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = (env[GLOBAL_LLM_SESSION_LIMIT_ENV] ?? "").trim();
+  if (!/^\d+$/.test(raw)) return DEFAULT_GLOBAL_LLM_SESSION_LIMIT;
+  const parsed = Number.parseInt(raw, 10);
+  return parsed >= 1 && parsed <= 64 ? parsed : DEFAULT_GLOBAL_LLM_SESSION_LIMIT;
+}
+
+export const GLOBAL_LLM_SESSION_LIMIT = resolveGlobalLlmSessionLimit();
 export const PR_GOVERNANCE_AGENT_IDS_ENV = "PAPERCLIP_PR_GOVERNANCE_AGENT_IDS";
 export const PR_GOVERNANCE_RESERVED_SLOTS_ENV = "PAPERCLIP_PR_GOVERNANCE_RESERVED_SLOTS";
 

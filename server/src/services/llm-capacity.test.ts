@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   evaluateLlmSessionAdmission,
+  DEFAULT_GLOBAL_LLM_SESSION_LIMIT,
   GLOBAL_LLM_SESSION_LIMIT,
   isPrGovernanceAgent,
   MANAGED_ACCOUNT_SESSION_LIMIT,
   remainingSessionSlots,
+  resolveGlobalLlmSessionLimit,
   resolvePrGovernanceReservationPolicy,
   withGlobalLlmStartLock,
 } from "./llm-capacity.js";
@@ -12,11 +14,19 @@ import {
 describe("LLM capacity policy", () => {
   it("keeps the explicit account and host limits", () => {
     expect(MANAGED_ACCOUNT_SESSION_LIMIT).toBe(2);
+    expect(GLOBAL_LLM_SESSION_LIMIT).toBe(DEFAULT_GLOBAL_LLM_SESSION_LIMIT);
     expect(GLOBAL_LLM_SESSION_LIMIT).toBe(4);
     expect(remainingSessionSlots(2, 0)).toBe(2);
     expect(remainingSessionSlots(2, 1)).toBe(1);
     expect(remainingSessionSlots(2, 2)).toBe(0);
     expect(remainingSessionSlots(4, 5)).toBe(0);
+  });
+
+  it("allows a bounded host limit override", () => {
+    expect(resolveGlobalLlmSessionLimit({ PAPERCLIP_GLOBAL_LLM_SESSION_LIMIT: "6" })).toBe(6);
+    expect(resolveGlobalLlmSessionLimit({ PAPERCLIP_GLOBAL_LLM_SESSION_LIMIT: "0" })).toBe(4);
+    expect(resolveGlobalLlmSessionLimit({ PAPERCLIP_GLOBAL_LLM_SESSION_LIMIT: "65" })).toBe(4);
+    expect(resolveGlobalLlmSessionLimit({ PAPERCLIP_GLOBAL_LLM_SESSION_LIMIT: "invalid" })).toBe(4);
   });
 
   it("serializes only the final claim section across providers", async () => {
