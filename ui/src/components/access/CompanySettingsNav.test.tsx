@@ -109,6 +109,7 @@ describe("CompanySettingsNav", () => {
           { value: "import", label: "Import" },
           { value: "codex-accounts", label: "Codex accounts" },
           { value: "claude-accounts", label: "Claude accounts" },
+          { value: "agent-assignments", label: "Agent assignments" },
           { value: "members", label: "Members" },
           { value: "invites", label: "Invites" },
           { value: "secrets", label: "Secrets" },
