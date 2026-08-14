@@ -77,9 +77,9 @@ WORKDIR /app
 # (the single most expensive layer: four CLI toolchains + apt, per arch) can
 # never hit the layer cache and rebuilds on every build.
 RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
-  && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai @google/gemini-cli@latest \
+  && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest @railway/cli@latest agent-browser@latest opencode-ai @google/gemini-cli@latest \
   && apt-get update \
-  && apt-get install -y --no-install-recommends openssh-client jq \
+  && apt-get install -y --no-install-recommends chromium jq openssh-client zsh \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /paperclip \
   && chown node:node /paperclip
@@ -101,12 +101,16 @@ ENV NODE_ENV=production \
   USER_UID=${USER_UID} \
   USER_GID=${USER_GID} \
   PAPERCLIP_CONFIG=/paperclip/instances/default/config.json \
+  AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \
   PAPERCLIP_DEPLOYMENT_MODE=authenticated \
   PAPERCLIP_DEPLOYMENT_EXPOSURE=private \
   OPENCODE_ALLOW_ALL_MODELS=true \
   GEMINI_SANDBOX=false
 
 EXPOSE 3100
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=5 \
+  CMD curl --fail --silent --show-error "http://127.0.0.1:${PORT:-3100}/api/health" >/dev/null || exit 1
 
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]

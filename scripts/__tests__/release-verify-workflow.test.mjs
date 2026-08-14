@@ -38,6 +38,38 @@ test("onboard smoke container binds beyond loopback so the mapped port is reacha
   assert.match(dockerfile, /onboard --yes --bind lan/);
 });
 
+test("promotion selection guards against sources that predate their channel tooling", () => {
+  const releaseWorkflow = readWorkflow("release.yml");
+
+  // Promotions run the source commit's release.sh, so selection must reject
+  // sources whose tooling does not know the target channel yet.
+  assert.match(releaseWorkflow, /git show "\$\{sha\}:scripts\/release\.sh" \| grep -qF 'canary\|nightly'/);
+  assert.match(releaseWorkflow, /git show "\$\{sha\}:scripts\/release\.sh" \| grep -qF 'canary\|nightly\|beta\|stable\)'/);
+});
+
+test("candidate-branch betas are validated and fully verified before publish", () => {
+  const releaseWorkflow = readWorkflow("release.yml");
+
+  // Candidate heads are new commits: selection must pin the naming
+  // convention and publication must be gated on full verification.
+  assert.match(releaseWorkflow, /candidate\/beta-\*\)/);
+  assert.match(
+    releaseWorkflow,
+    /verify_beta_candidate:\n\s+needs: select_beta\n\s+if: needs\.select_beta\.outputs\.mode == 'candidate'\n\s+uses: \.\/\.github\/workflows\/release-verify\.yml/,
+  );
+  assert.match(releaseWorkflow, /needs\.verify_beta_candidate\.result == 'success'/);
+});
+
+test("every lane's tag push degrades to recovery instructions when rejected", () => {
+  const releaseWorkflow = readWorkflow("release.yml");
+
+  // GITHUB_TOKEN may not create refs pointing at workflow-modifying commits
+  // from dispatch or scheduled runs; a rejected tag push after a successful
+  // npm publish must surface runbook recovery commands, not a bare error.
+  const occurrences = releaseWorkflow.match(/## Tag push rejected/g) ?? [];
+  assert.equal(occurrences.length, 3, "nightly, beta, and stable each carry the recovery summary");
+});
+
 test("release smoke workflow extends the container readiness budget for CI", () => {
   const smokeWorkflow = readWorkflow("release-smoke.yml");
   const harness = readFileSync(path.join(repoRoot, "scripts/docker-onboard-smoke.sh"), "utf8");
@@ -73,6 +105,15 @@ test("release verify workflow covers the same split test surface as stable PR ve
 
   for (const shardIndex of [0, 1, 2, 3, 4]) {
     assert.match(verifyWorkflow, new RegExp(`shard_index: ${shardIndex}[\\s\\S]*?shard_count: 5`));
+  }
+
+  // workspaces-a splits with Vitest native --shard in pr.yml; release
+  // verification must keep the same two-shard coverage.
+  for (const shardIndex of [0, 1]) {
+    assert.match(
+      verifyWorkflow,
+      new RegExp(`group: general-workspaces-a[\\s\\S]*?shard_index: ${shardIndex}\\n\\s+shard_count: 2`),
+    );
   }
 
   assert.match(verifyWorkflow, /pnpm test:run:general -- --group/);

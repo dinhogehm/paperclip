@@ -16,6 +16,7 @@ export function parseBuildCommit(value: string | null | undefined): string | nul
 export function readBuildCommit(
   opts: {
     environmentCommit?: string | null;
+    platformCommit?: string | null;
     buildCommitPath?: string;
     readTextFile?: ReadTextFile;
   } = {},
@@ -26,6 +27,13 @@ export function readBuildCommit(
       : opts.environmentCommit,
   );
   if (environmentCommit) return environmentCommit;
+
+  const platformCommit = parseBuildCommit(
+    opts.platformCommit === undefined
+      ? process.env.RAILWAY_GIT_COMMIT_SHA
+      : opts.platformCommit,
+  );
+  if (platformCommit) return platformCommit;
 
   try {
     const readTextFile = opts.readTextFile ?? ((path: string) => readFileSync(path, "utf8"));

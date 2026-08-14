@@ -215,7 +215,10 @@ export function secondsToWindowLabel(
   if (hours < 6) return "5h";
   if (hours <= 24) return "24h";
   if (hours <= 168) return "7d";
-  return `${Math.round(hours / 24)}d`;
+  const days = Math.round(hours / 24);
+  // ~30-day provider windows surface as Monthly in the accounts UI.
+  if (days >= 28 && days <= 31) return "30d";
+  return `${days}d`;
 }
 
 export function codexQuotaWindowLabel(
@@ -225,6 +228,7 @@ export function codexQuotaWindowLabel(
   const duration = secondsToWindowLabel(seconds, fallback);
   if (duration === "24h") return "Daily limit";
   if (duration === "7d") return "Weekly limit";
+  if (duration === "30d") return "Monthly limit";
   return `${duration} limit`;
 }
 

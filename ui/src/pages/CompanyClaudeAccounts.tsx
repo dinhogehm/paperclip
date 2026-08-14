@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, CircleAlert, ExternalLink, KeyRound, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { claudeAccountsApi } from "@/api/claudeAccounts";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useCompany } from "@/context/CompanyContext";
 import { queryKeys } from "@/lib/queryKeys";
@@ -13,6 +14,8 @@ export function CompanyClaudeAccounts() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const [accountName, setAccountName] = useState("");
+  const [browserCodes, setBrowserCodes] = useState<Record<string, string>>({});
+  const pendingBrowserCodesRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
     setBreadcrumbs([
@@ -38,6 +41,17 @@ export function CompanyClaudeAccounts() {
     mutationFn: (accountId: string) => claudeAccountsApi.startLogin(selectedCompanyId!, accountId),
     onSuccess: async (login) => {
       if (login.verificationUrl) window.open(login.verificationUrl, "_blank", "noopener,noreferrer");
+      await invalidate();
+    },
+  });
+  const submitLoginCodeMutation = useMutation({
+    mutationFn: (accountId: string) => {
+      const browserCode = pendingBrowserCodesRef.current[accountId];
+      delete pendingBrowserCodesRef.current[accountId];
+      if (!browserCode) throw new Error("Enter the complete code#state value shown by Claude.");
+      return claudeAccountsApi.submitLoginCode(selectedCompanyId!, accountId, { browserCode });
+    },
+    onSuccess: async () => {
       await invalidate();
     },
   });
@@ -138,14 +152,57 @@ export function CompanyClaudeAccounts() {
                     </div>
                   </div>
                   {waiting ? (
-                    <div className="mt-3 rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-                      Complete the Claude login in the browser window opened by the CLI.
+                    <div className="mt-3 space-y-3 rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
+                      <p>Complete the Claude login in the browser window opened by the CLI.</p>
                       {account.login.verificationUrl ? <Button size="sm" variant="link" asChild><a href={account.login.verificationUrl} target="_blank" rel="noreferrer">Open login<ExternalLink className="ml-1 h-3.5 w-3.5" /></a></Button> : null}
+                      {account.login.acceptsBrowserCode ? (
+                        <form className="space-y-2" onSubmit={(event) => {
+                          event.preventDefault();
+                          const browserCode = browserCodes[account.id]?.trim();
+                          if (!browserCode) return;
+                          pendingBrowserCodesRef.current[account.id] = browserCode;
+                          setBrowserCodes((current) => ({ ...current, [account.id]: "" }));
+                          // React Query retains mutation variables for diagnostics,
+                          // so pass only the account id and keep the one-time code
+                          // out of its cache/devtools state.
+                          submitLoginCodeMutation.mutate(account.id);
+                        }}>
+                          <label className="block font-medium text-foreground" htmlFor={`claude-browser-code-${account.id}`}>
+                            Authentication code
+                          </label>
+                          <div className="flex flex-col gap-2 sm:flex-row">
+                            <Input
+                              id={`claude-browser-code-${account.id}`}
+                              aria-label={`Claude authentication code for ${account.name}`}
+                              type="password"
+                              autoComplete="one-time-code"
+                              spellCheck={false}
+                              value={browserCodes[account.id] ?? ""}
+                              onChange={(event) => setBrowserCodes((current) => ({
+                                ...current,
+                                [account.id]: event.target.value,
+                              }))}
+                              placeholder="Paste code#state"
+                            />
+                            <Button
+                              type="submit"
+                              size="sm"
+                              disabled={!browserCodes[account.id]?.trim() || submitLoginCodeMutation.isPending}
+                            >
+                              {submitLoginCodeMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
+                              Submit code
+                            </Button>
+                          </div>
+                          <p>The one-time code is sent only to the active Claude CLI process and is not saved.</p>
+                        </form>
+                      ) : account.login.browserCodeSubmitted ? (
+                        <p>Code submitted. Waiting for Claude to finish authentication…</p>
+                      ) : null}
                     </div>
                   ) : null}
                   {account.login.error ? <p className="mt-3 text-xs text-destructive">{account.login.error}</p> : null}
                   {account.authenticated ? (
-                    <div className="mt-4 grid gap-2 border-t border-border pt-3 sm:grid-cols-2">
+                    <div className="mt-4 grid gap-2 border-t border-border pt-3 sm:grid-cols-2 lg:grid-cols-3">
                       {account.quota.windows.length ? account.quota.windows.map((window) => {
                         const used = window.usedPercent == null ? null : Math.max(0, Math.min(100, Math.round(window.usedPercent)));
                         return <div key={`${window.label}-${window.resetsAt ?? "none"}`} className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
@@ -161,7 +218,7 @@ export function CompanyClaudeAccounts() {
             })}
           </div>
         )}
-        {[createMutation, loginMutation, removeMutation].map((mutation, index) => mutation.isError
+        {[createMutation, loginMutation, submitLoginCodeMutation, removeMutation].map((mutation, index) => mutation.isError
           ? <p key={index} className="text-xs text-destructive">{mutation.error.message}</p>
           : null)}
       </section>

@@ -2362,6 +2362,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     await fs.mkdir(skillDir, { recursive: true });
     await fs.writeFile(path.join(skillDir, "SKILL.md"), "---\nname: Shared Skill\n---\n", "utf8");
     await fs.writeFile(path.join(existingSkillDir, "SKILL.md"), "---\nname: Shared Skill\n---\n", "utf8");
+    const canonicalSkillDir = await fs.realpath(skillDir);
     await db.insert(companies).values({
       id: companyId,
       name: "Paperclip",
@@ -2415,7 +2416,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
       expect.objectContaining({
         slug: "shared-skill-project",
         key: expect.stringMatching(/^local\/[a-f0-9]+\/shared-skill-project$/),
-        sourceLocator: skillDir,
+        sourceLocator: canonicalSkillDir,
       }),
     ]);
   });
@@ -2441,6 +2442,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     await fs.writeFile(path.join(ignoredSkillDir, "SKILL.md"), "---\nname: Ignored Skill\n---\n", "utf8");
     await fs.writeFile(outsideSkillFile, "---\nname: Ignored Linked Skill\n---\n", "utf8");
     await fs.symlink(outsideSkillFile, path.join(ignoredLinkedSkillDir, "SKILL.md"));
+    const canonicalSelectedSkillDir = await fs.realpath(selectedSkillDir);
     await db.insert(companies).values({
       id: companyId,
       name: "Paperclip",
@@ -2470,7 +2472,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     expect(result.imported[0]).toMatchObject({
       name: "Selected Skill",
       sourceType: "local_path",
-      sourceLocator: selectedSkillDir,
+      sourceLocator: canonicalSelectedSkillDir,
       metadata: expect.objectContaining({ sourceKind: "project_scan", workspaceId, projectId }),
     });
     expect(result.candidates).toEqual([
@@ -2492,7 +2494,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     const persisted = await db.select().from(companySkills).where(eq(companySkills.companyId, companyId));
     const projectScanSkills = persisted.filter((skill) => skill.metadata?.sourceKind === "project_scan");
     expect(projectScanSkills).toHaveLength(1);
-    expect(projectScanSkills[0]?.sourceLocator).toBe(selectedSkillDir);
+    expect(projectScanSkills[0]?.sourceLocator).toBe(canonicalSelectedSkillDir);
   });
 
   it("treats out-of-scope workspace selections as unmatched without leaking workspace metadata", async () => {
@@ -2550,6 +2552,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
         isPrimary: true,
       },
     ]);
+    const canonicalSelectedSkillDir = await fs.realpath(selectedSkillDir);
 
     const result = await svc.scanProjectWorkspaces(companyId, {
       mode: "import",
@@ -2568,7 +2571,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     expect(result.imported[0]).toMatchObject({
       name: "Selected Skill",
       sourceType: "local_path",
-      sourceLocator: selectedSkillDir,
+      sourceLocator: canonicalSelectedSkillDir,
       metadata: expect.objectContaining({ sourceKind: "project_scan", workspaceId, projectId }),
     });
     expect(result.candidates).toEqual([
@@ -2606,6 +2609,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     await fs.writeFile(path.join(outsideDir, "SKILL.md"), "---\nname: Outside Directory Skill\n---\n", "utf8");
     await fs.symlink(outsideSkillFile, path.join(linkedSkillDir, "SKILL.md"));
     await fs.symlink(outsideDir, path.join(workspaceDir, "linked-directory"));
+    const canonicalLinkedSkillDir = await fs.realpath(linkedSkillDir);
     await db.insert(companies).values({
       id: companyId,
       name: "Paperclip",
@@ -2642,7 +2646,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     expect(result.skipped).toEqual(expect.arrayContaining([
       expect.objectContaining({
         workspaceId,
-        path: linkedSkillDir,
+        path: canonicalLinkedSkillDir,
         reason: expect.stringContaining("symbolic link"),
       }),
       expect.objectContaining({

@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -85,13 +86,7 @@ function trimToLatestUsagePanel(text: string): string | null {
   return tail;
 }
 
-async function readClaudeTokenFromFile(credPath: string): Promise<string | null> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(credPath, "utf8");
-  } catch {
-    return null;
-  }
+function parseClaudeOAuthAccessToken(raw: string): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -104,6 +99,50 @@ async function readClaudeTokenFromFile(credPath: string): Promise<string | null>
   if (typeof oauth !== "object" || oauth === null) return null;
   const token = (oauth as Record<string, unknown>)["accessToken"];
   return typeof token === "string" && token.length > 0 ? token : null;
+}
+
+async function readClaudeTokenFromFile(credPath: string): Promise<string | null> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(credPath, "utf8");
+  } catch {
+    return null;
+  }
+  return parseClaudeOAuthAccessToken(raw);
+}
+
+/** Claude Code stores subscription tokens in the macOS keychain as
+ * `Claude Code-credentials-<sha256(configDir)[0:8]>` (and sometimes the unhashed service). */
+export function claudeKeychainCredentialServiceName(configDir: string): string {
+  const hash = createHash("sha256").update(configDir).digest("hex").slice(0, 8);
+  return `Claude Code-credentials-${hash}`;
+}
+
+async function readClaudeTokenFromMacKeychain(configDir: string): Promise<string | null> {
+  if (process.platform !== "darwin") return null;
+  const services = [
+    claudeKeychainCredentialServiceName(configDir),
+    "Claude Code-credentials",
+  ];
+  const account = os.userInfo().username;
+  for (const service of services) {
+    for (const args of [
+      ["find-generic-password", "-s", service, "-a", account, "-w"],
+      ["find-generic-password", "-s", service, "-w"],
+    ]) {
+      try {
+        const { stdout } = await execFileAsync("security", args, {
+          timeout: 5_000,
+          maxBuffer: 1024 * 1024,
+        });
+        const token = parseClaudeOAuthAccessToken(stdout.trim());
+        if (token) return token;
+      } catch {
+        // try next lookup shape
+      }
+    }
+  }
+  return null;
 }
 
 export interface ClaudeAuthStatus {
@@ -144,7 +183,7 @@ export async function readClaudeToken(env: NodeJS.ProcessEnv = process.env): Pro
     const token = await readClaudeTokenFromFile(path.join(configDir, filename));
     if (token) return token;
   }
-  return null;
+  return readClaudeTokenFromMacKeychain(configDir);
 }
 
 interface AnthropicUsageWindow {
@@ -210,6 +249,39 @@ export async function fetchWithTimeout(url: string, init: RequestInit, ms = 8000
   }
 }
 
+const CLAUDE_SESSION_LIMIT_LABEL = "Session limit (5h)";
+const CLAUDE_WEEKLY_LIMIT_LABEL = "Weekly limit";
+const CLAUDE_MONTHLY_LIMIT_LABEL = "Monthly limit";
+const CLAUDE_WEEKLY_SONNET_LABEL = "Weekly limit (Sonnet only)";
+const CLAUDE_WEEKLY_OPUS_LABEL = "Weekly limit (Opus only)";
+const CLAUDE_PRIMARY_QUOTA_LABELS = [
+  CLAUDE_SESSION_LIMIT_LABEL,
+  CLAUDE_WEEKLY_LIMIT_LABEL,
+  CLAUDE_MONTHLY_LIMIT_LABEL,
+] as const;
+
+function unavailableClaudeWindow(label: string): QuotaWindow {
+  return {
+    label,
+    usedPercent: null,
+    resetsAt: null,
+    valueLabel: "Unavailable",
+    detail: "Usage not reported for this window",
+  };
+}
+
+/** Keep Session / Weekly / Monthly first and always present for UI parity with Codex. */
+export function withClaudePrimaryQuotaWindows(windows: QuotaWindow[]): QuotaWindow[] {
+  const byLabel = new Map(windows.map((window) => [window.label, window]));
+  const primary = CLAUDE_PRIMARY_QUOTA_LABELS.map(
+    (label) => byLabel.get(label) ?? unavailableClaudeWindow(label),
+  );
+  const secondary = windows.filter(
+    (window) => !(CLAUDE_PRIMARY_QUOTA_LABELS as readonly string[]).includes(window.label),
+  );
+  return [...primary, ...secondary];
+}
+
 export async function fetchClaudeQuota(token: string): Promise<QuotaWindow[]> {
   const resp = await fetchWithTimeout("https://api.anthropic.com/api/oauth/usage", {
     headers: {
@@ -223,7 +295,7 @@ export async function fetchClaudeQuota(token: string): Promise<QuotaWindow[]> {
 
   if (body.five_hour != null) {
     windows.push({
-      label: "Current session",
+      label: CLAUDE_SESSION_LIMIT_LABEL,
       usedPercent: toPercent(body.five_hour.utilization),
       resetsAt: body.five_hour.resets_at ?? null,
       valueLabel: null,
@@ -232,7 +304,7 @@ export async function fetchClaudeQuota(token: string): Promise<QuotaWindow[]> {
   }
   if (body.seven_day != null) {
     windows.push({
-      label: "Current week (all models)",
+      label: CLAUDE_WEEKLY_LIMIT_LABEL,
       usedPercent: toPercent(body.seven_day.utilization),
       resetsAt: body.seven_day.resets_at ?? null,
       valueLabel: null,
@@ -241,7 +313,7 @@ export async function fetchClaudeQuota(token: string): Promise<QuotaWindow[]> {
   }
   if (body.seven_day_sonnet != null) {
     windows.push({
-      label: "Current week (Sonnet only)",
+      label: CLAUDE_WEEKLY_SONNET_LABEL,
       usedPercent: toPercent(body.seven_day_sonnet.utilization),
       resetsAt: body.seven_day_sonnet.resets_at ?? null,
       valueLabel: null,
@@ -250,7 +322,7 @@ export async function fetchClaudeQuota(token: string): Promise<QuotaWindow[]> {
   }
   if (body.seven_day_opus != null) {
     windows.push({
-      label: "Current week (Opus only)",
+      label: CLAUDE_WEEKLY_OPUS_LABEL,
       usedPercent: toPercent(body.seven_day_opus.utilization),
       resetsAt: body.seven_day_opus.resets_at ?? null,
       valueLabel: null,
@@ -259,7 +331,7 @@ export async function fetchClaudeQuota(token: string): Promise<QuotaWindow[]> {
   }
   if (body.extra_usage != null) {
     windows.push({
-      label: "Extra usage",
+      label: CLAUDE_MONTHLY_LIMIT_LABEL,
       usedPercent: body.extra_usage.is_enabled === false ? null : toPercent(body.extra_usage.utilization),
       resetsAt: null,
       valueLabel:
@@ -268,11 +340,11 @@ export async function fetchClaudeQuota(token: string): Promise<QuotaWindow[]> {
           : formatExtraUsageLabel(body.extra_usage),
       detail:
         body.extra_usage.is_enabled === false
-          ? "Extra usage not enabled"
+          ? "Monthly extra usage not enabled"
           : "Monthly extra usage pool",
     });
   }
-  return windows;
+  return withClaudePrimaryQuotaWindows(windows);
 }
 
 function usageOutputLooksRelevant(text: string): boolean {
@@ -335,28 +407,38 @@ function percentFromLine(line: string): number | null {
 function isQuotaLabel(line: string): boolean {
   const normalized = normalizeForLabelSearch(line);
   return normalized === "currentsession"
+    || normalized === "sessionlimit5h"
     || normalized === "currentweekallmodels"
+    || normalized === "weeklylimit"
     || normalized === "currentweeksonnetonly"
     || normalized === "currentweeksonnet"
+    || normalized === "weeklylimitsonnetonly"
     || normalized === "currentweekopusonly"
     || normalized === "currentweekopus"
-    || normalized === "extrausage";
+    || normalized === "weeklylimitopusonly"
+    || normalized === "extrausage"
+    || normalized === "monthlylimit";
 }
 
 function canonicalQuotaLabel(line: string): string {
   switch (normalizeForLabelSearch(line)) {
     case "currentsession":
-      return "Current session";
+    case "sessionlimit5h":
+      return CLAUDE_SESSION_LIMIT_LABEL;
     case "currentweekallmodels":
-      return "Current week (all models)";
+    case "weeklylimit":
+      return CLAUDE_WEEKLY_LIMIT_LABEL;
     case "currentweeksonnetonly":
     case "currentweeksonnet":
-      return "Current week (Sonnet only)";
+    case "weeklylimitsonnetonly":
+      return CLAUDE_WEEKLY_SONNET_LABEL;
     case "currentweekopusonly":
     case "currentweekopus":
-      return "Current week (Opus only)";
+    case "weeklylimitopusonly":
+      return CLAUDE_WEEKLY_OPUS_LABEL;
     case "extrausage":
-      return "Extra usage";
+    case "monthlylimit":
+      return CLAUDE_MONTHLY_LIMIT_LABEL;
     default:
       return line;
   }
@@ -364,10 +446,10 @@ function canonicalQuotaLabel(line: string): string {
 
 function formatClaudeCliDetail(label: string, lines: string[]): string | null {
   const normalizedLabel = normalizeForLabelSearch(label);
-  if (normalizedLabel === "extrausage") {
+  if (normalizedLabel === "extrausage" || normalizedLabel === "monthlylimit") {
     const compact = lines.join(" ").replace(/\s+/g, "").toLowerCase();
     if (compact.includes("extrausagenotenabled")) {
-      return "Extra usage not enabled • /extra-usage to enable";
+      return "Monthly extra usage not enabled • /extra-usage to enable";
     }
     const firstLine = lines.find((line) => line.trim().length > 0) ?? null;
     return firstLine;
@@ -419,10 +501,10 @@ export function parseClaudeCliUsageText(text: string): QuotaWindow[] {
     };
   });
 
-  if (!windows.some((window) => normalizeForLabelSearch(window.label) === "currentsession")) {
+  if (!windows.some((window) => normalizeForLabelSearch(window.label) === "sessionlimit5h")) {
     throw new Error("Could not parse Claude CLI usage output.");
   }
-  return windows;
+  return withClaudePrimaryQuotaWindows(windows);
 }
 
 function quoteForShell(value: string): string {
@@ -563,7 +645,12 @@ export async function getQuotaWindows(env: NodeJS.ProcessEnv = process.env): Pro
     env.CLAUDE_CODE_USE_BEDROCK === "true" ||
     hasNonEmptyProcessEnv("ANTHROPIC_BEDROCK_BASE_URL", env)
   ) {
-    return { provider: "anthropic", source: "bedrock", ok: true, windows: [] };
+    return {
+      provider: "anthropic",
+      source: "bedrock",
+      ok: true,
+      windows: withClaudePrimaryQuotaWindows([]),
+    };
   }
 
   const authStatus = await readClaudeAuthStatus(env);

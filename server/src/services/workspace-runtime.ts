@@ -5340,6 +5340,10 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
       runtimeServiceId: row.id,
       profileKind: "workspace-runtime",
     });
+    const adoptedRecordCwdMatches = !adoptedRecord
+      || row.cwd === null
+      || await resolvePathForWorktreeComparison(adoptedRecord.cwd)
+        === await resolvePathForWorktreeComparison(row.cwd);
     if (
       adoptedRecord
       && (
@@ -5347,7 +5351,7 @@ export async function reconcilePersistedRuntimeServicesOnStartup(db: Db) {
         || adoptedRecord.serviceName !== row.serviceName
         || adoptedRecord.envFingerprint !== (row.reuseKey ?? "")
         || adoptedRecord.port !== (row.port ?? null)
-        || (row.cwd !== null && path.resolve(adoptedRecord.cwd) !== path.resolve(row.cwd))
+        || !adoptedRecordCwdMatches
       )
     ) {
       await removeLocalServiceRegistryRecord(adoptedRecord.serviceKey);

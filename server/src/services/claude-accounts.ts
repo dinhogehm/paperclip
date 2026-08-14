@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { and, asc, eq, ne } from "drizzle-orm";
@@ -13,7 +13,11 @@ import type {
   ClaudeAccountsOverview,
 } from "@paperclipai/shared";
 import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-utils/server-utils";
-import { getQuotaWindows, readClaudeAuthStatus } from "@paperclipai/adapter-claude-local/server";
+import {
+  getQuotaWindows,
+  readClaudeAuthStatus,
+  withClaudePrimaryQuotaWindows,
+} from "@paperclipai/adapter-claude-local/server";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { agentService } from "./agents.js";
 import { MANAGED_ACCOUNT_SESSION_LIMIT } from "./llm-capacity.js";
@@ -39,6 +43,7 @@ interface LoginSession {
   active: boolean;
   status: "waiting_for_user" | "authenticated" | "failed" | "expired";
   verificationUrl: string | null;
+  browserCodeSubmitted: boolean;
   startedAt: string;
   expiresAt: string;
   error: string | null;
@@ -120,6 +125,8 @@ function publicLoginState(session: LoginSession | undefined): ClaudeAccountLogin
     return {
       status: "idle",
       verificationUrl: null,
+      acceptsBrowserCode: false,
+      browserCodeSubmitted: false,
       startedAt: null,
       expiresAt: null,
       error: null,
@@ -128,10 +135,42 @@ function publicLoginState(session: LoginSession | undefined): ClaudeAccountLogin
   return {
     status: session.status,
     verificationUrl: session.verificationUrl,
+    acceptsBrowserCode: session.active
+      && session.status === "waiting_for_user"
+      && !session.browserCodeSubmitted
+      && readVerificationState(session.verificationUrl) !== null
+      && session.process.stdin?.writable === true,
+    browserCodeSubmitted: session.browserCodeSubmitted,
     startedAt: session.startedAt,
     expiresAt: session.expiresAt,
     error: session.error,
   };
+}
+
+function readVerificationState(verificationUrl: string | null): string | null {
+  if (!verificationUrl) return null;
+  try {
+    return new URL(verificationUrl).searchParams.get("state")?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function readSubmittedState(browserCode: string): string | null {
+  const separator = browserCode.indexOf("#");
+  if (separator <= 0 || separator !== browserCode.lastIndexOf("#")) return null;
+  return browserCode.slice(separator + 1).trim() || null;
+}
+
+function timingSafeStringEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left, "utf8");
+  const rightBytes = Buffer.from(right, "utf8");
+  const width = Math.max(leftBytes.length, rightBytes.length);
+  const paddedLeft = Buffer.alloc(width);
+  const paddedRight = Buffer.alloc(width);
+  leftBytes.copy(paddedLeft);
+  rightBytes.copy(paddedRight);
+  return timingSafeEqual(paddedLeft, paddedRight) && leftBytes.length === rightBytes.length;
 }
 
 function normalizeClaudeAccountMode(value: string): ClaudeAccountMode {
@@ -275,16 +314,26 @@ async function loadQuota(env: NodeJS.ProcessEnv, authenticated: boolean): Promis
   if (!authenticated) return { status: "unauthenticated", windows: [], fetchedAt: null, error: null };
   const fetchedAt = new Date().toISOString();
   const result = await getQuotaWindows(env);
+  const windows = withClaudePrimaryQuotaWindows(result.windows).map((window) => ({
+    ...window,
+    detail: window.detail ?? null,
+  }));
   if (!result.ok) {
-    return { status: "unknown", windows: [], fetchedAt, error: result.error ?? "Usage is unavailable." };
+    return {
+      status: "unknown",
+      windows,
+      fetchedAt,
+      error: result.error ?? "Usage is unavailable.",
+    };
   }
+  const measured = windows.filter((window) => window.usedPercent != null);
   return {
-    status: result.windows.some((window) => window.usedPercent != null && window.usedPercent >= 100)
+    status: measured.some((window) => window.usedPercent != null && window.usedPercent >= 100)
       ? "exhausted"
-      : result.windows.length ? "available" : "unknown",
-    windows: result.windows.map((window) => ({ ...window, detail: window.detail ?? null })),
+      : measured.length ? "available" : "unknown",
+    windows,
     fetchedAt,
-    error: result.windows.length ? null : "Anthropic did not report usage windows for this account.",
+    error: measured.length ? null : result.error ?? "Anthropic did not report usage windows for this account.",
   };
 }
 
@@ -387,7 +436,10 @@ export function claudeAccountService(db: Db) {
       const expiresAt = new Date(startedAt.getTime() + LOGIN_LIFETIME_MS);
       const child = spawn(resolveClaudeExecutable(), ["auth", "login", "--claudeai"], {
         env: accountEnv(companyId, accountId),
-        stdio: ["ignore", "pipe", "pipe"],
+        // Claude's remote OAuth flow displays `code#state` in the browser and
+        // waits for that value on stdin. Keep stdin piped so the board can
+        // forward the one-time value without persisting it anywhere.
+        stdio: ["pipe", "pipe", "pipe"],
         shell: false,
         detached: false,
       });
@@ -398,6 +450,7 @@ export function claudeAccountService(db: Db) {
         active: true,
         status: "waiting_for_user",
         verificationUrl: null,
+        browserCodeSubmitted: false,
         startedAt: startedAt.toISOString(),
         expiresAt: expiresAt.toISOString(),
         error: null,
@@ -449,6 +502,66 @@ export function claudeAccountService(db: Db) {
       });
       await new Promise((resolve) => setTimeout(resolve, 500));
       return publicLoginState(session);
+    },
+
+    submitLoginCode: async (
+      companyId: string,
+      accountId: string,
+      browserCode: string,
+    ): Promise<ClaudeAccountLoginState> => {
+      await requireAccount(companyId, accountId);
+      const session = loginSessions.get(accountId);
+      if (
+        !session
+        || session.companyId !== companyId
+        || !session.active
+        || session.status !== "waiting_for_user"
+      ) {
+        throw conflict("No active Claude login is waiting for an authentication code. Start authentication again.");
+      }
+      if (session.browserCodeSubmitted) {
+        throw conflict("An authentication code was already submitted for this Claude login.");
+      }
+      const expectedState = readVerificationState(session.verificationUrl);
+      const submittedState = readSubmittedState(browserCode);
+      if (
+        !expectedState
+        || !submittedState
+        || !timingSafeStringEqual(expectedState, submittedState)
+      ) {
+        // Keep the live session available: the operator may have copied a code
+        // from an older browser tab and can retry with this session's value.
+        throw conflict("The authentication code does not match this Claude login. Copy the latest complete code#state value and try again.");
+      }
+      const stdin = session.process.stdin;
+      if (!stdin?.writable) {
+        session.active = false;
+        session.status = "failed";
+        session.error = "Claude login cannot accept the authentication code. Start a new login and try again.";
+        clearTimeout(session.expiryTimer);
+        terminate(session);
+        throw conflict(session.error);
+      }
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          stdin.write(`${browserCode}\n`, "utf8", (error) => {
+            if (error) reject(error);
+            else resolve();
+          });
+        });
+        // Persist only the fact that submission occurred in this in-memory
+        // session. The one-time OAuth value is never retained or returned.
+        session.browserCodeSubmitted = true;
+        return publicLoginState(session);
+      } catch {
+        session.active = false;
+        session.status = "failed";
+        session.error = "Paperclip could not send the authentication code to Claude. Start a new login and try again.";
+        clearTimeout(session.expiryTimer);
+        terminate(session);
+        throw conflict(session.error);
+      }
     },
 
     assignAgent: async (

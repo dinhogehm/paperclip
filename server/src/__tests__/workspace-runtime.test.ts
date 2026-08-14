@@ -3464,6 +3464,7 @@ describe("realizeExecutionWorkspace", () => {
       "utf8",
     );
     process.env.PAPERCLIP_WORKTREES_DIR = worktreesDir;
+    const canonicalInstanceRoot = await fs.realpath(instanceRoot);
 
     await cleanupExecutionWorkspaceArtifacts({
       workspace: {
@@ -3498,7 +3499,7 @@ describe("realizeExecutionWorkspace", () => {
     expect(operations[0]?.command).toBe("printf 'cleanup ok\\n'");
     expect(operations[1]?.metadata).toMatchObject({
       cleanupAction: "remove_worktree_instance",
-      instanceRoot,
+      instanceRoot: canonicalInstanceRoot,
     });
     expect(operations[2]?.metadata).toMatchObject({
       cleanupAction: "worktree_remove",

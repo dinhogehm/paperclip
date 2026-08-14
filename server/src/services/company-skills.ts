@@ -1101,6 +1101,23 @@ async function statPath(targetPath: string) {
   return fs.stat(targetPath).catch(() => null);
 }
 
+async function pathHasExactBasename(targetPath: string) {
+  const basename = path.basename(targetPath);
+  return fs.readdir(path.dirname(targetPath))
+    .then((entries) => entries.includes(basename))
+    .catch(() => false);
+}
+
+async function statExactPath(targetPath: string) {
+  if (!await pathHasExactBasename(targetPath)) return null;
+  return statPath(targetPath);
+}
+
+async function lstatExactPath(targetPath: string) {
+  if (!await pathHasExactBasename(targetPath)) return null;
+  return fs.lstat(targetPath).catch(() => null);
+}
+
 function pathIsContained(rootPath: string, candidatePath: string) {
   const relativePath = path.relative(rootPath, candidatePath);
   return relativePath === ""
@@ -1128,13 +1145,16 @@ async function validateProjectSkillImportPath(
 ) {
   const resolvedWorkspaceRoot = path.resolve(workspaceRoot);
   const resolvedSkillDir = path.resolve(skillDir);
-  if (!pathIsContained(resolvedWorkspaceRoot, resolvedSkillDir)) {
+  const canonicalWorkspaceRoot = await fs.realpath(resolvedWorkspaceRoot);
+  const skillDirUsesResolvedRoot = pathIsContained(resolvedWorkspaceRoot, resolvedSkillDir);
+  const skillDirUsesCanonicalRoot = pathIsContained(canonicalWorkspaceRoot, resolvedSkillDir);
+  if (!skillDirUsesResolvedRoot && !skillDirUsesCanonicalRoot) {
     throw unprocessable(`Project skill candidate ${resolvedSkillDir} is outside workspace root ${resolvedWorkspaceRoot}.`);
   }
 
-  const canonicalWorkspaceRoot = await fs.realpath(resolvedWorkspaceRoot);
-  let currentPath = resolvedWorkspaceRoot;
-  const relativeSkillDir = path.relative(resolvedWorkspaceRoot, resolvedSkillDir);
+  const comparisonRoot = skillDirUsesResolvedRoot ? resolvedWorkspaceRoot : canonicalWorkspaceRoot;
+  let currentPath = comparisonRoot;
+  const relativeSkillDir = path.relative(comparisonRoot, resolvedSkillDir);
   for (const segment of relativeSkillDir.split(path.sep).filter(Boolean)) {
     currentPath = path.join(currentPath, segment);
     const segmentStat = await fs.lstat(currentPath);
@@ -1149,7 +1169,10 @@ async function validateProjectSkillImportPath(
   }
 
   const skillFilePath = path.join(resolvedSkillDir, "SKILL.md");
-  const skillFileStat = await fs.lstat(skillFilePath);
+  const skillFileStat = await lstatExactPath(skillFilePath);
+  if (!skillFileStat) {
+    throw unprocessable(`No SKILL.md file was found in ${resolvedSkillDir}.`);
+  }
   if (skillFileStat.isSymbolicLink()) {
     throw unprocessable(`Project skill candidate contains a symbolic link at ${skillFilePath}.`);
   }
@@ -1193,7 +1216,7 @@ async function collectLocalSkillInventory(
   mode: LocalSkillInventoryMode = "full",
 ): Promise<CompanySkillFileInventoryEntry[]> {
   const skillFilePath = path.join(skillDir, "SKILL.md");
-  const skillFileStat = await statPath(skillFilePath);
+  const skillFileStat = await statExactPath(skillFilePath);
   if (!skillFileStat?.isFile()) {
     throw unprocessable(`No SKILL.md file was found in ${skillDir}.`);
   }
@@ -1374,6 +1397,10 @@ export async function readLocalSkillImportFromDirectory(
     await validateProjectSkillImportPath(resolvedSkillDir, options.workspaceRoot, inventoryMode);
   }
   const skillFilePath = path.join(resolvedSkillDir, "SKILL.md");
+  const skillFileStat = await statExactPath(skillFilePath);
+  if (!skillFileStat?.isFile()) {
+    throw unprocessable(`No SKILL.md file was found in ${resolvedSkillDir}.`);
+  }
   const markdown = await fs.readFile(skillFilePath, "utf8");
   const parsed = parseFrontmatterMarkdown(markdown);
   const slug = deriveImportedSkillSlug(parsed.frontmatter, path.basename(resolvedSkillDir));
@@ -1426,7 +1453,7 @@ export async function discoverProjectWorkspaceSkillDirectories(
   const workspaceRoot = await fs.realpath(path.resolve(target.workspaceCwd)).catch(() => null);
   if (!workspaceRoot) return [];
   const rootSkillPath = path.join(workspaceRoot, "SKILL.md");
-  if ((await statPath(rootSkillPath))?.isFile()) {
+  if ((await statExactPath(rootSkillPath))?.isFile()) {
     discovered.set(workspaceRoot, {
       directoryRoot: ".",
       relativePath: ".",
@@ -1448,7 +1475,7 @@ export async function discoverProjectWorkspaceSkillDirectories(
       || relativeToWorkspace.startsWith(`..${path.sep}`)
       || path.isAbsolute(relativeToWorkspace)
     ) continue;
-    if (!(await statPath(path.join(absoluteSkillDir, "SKILL.md")))?.isFile()) continue;
+    if (!(await statExactPath(path.join(absoluteSkillDir, "SKILL.md")))?.isFile()) continue;
     discovered.set(absoluteSkillDir, {
       directoryRoot: relativeSkillDir === "." ? "." : path.posix.dirname(relativeSkillDir),
       relativePath: relativeSkillDir,
@@ -1466,7 +1493,7 @@ export async function discoverProjectWorkspaceSkillDirectories(
       const absoluteSkillDir = path.resolve(absoluteRoot, entry.name);
       const entryStat = entry.isSymbolicLink() ? await statPath(absoluteSkillDir) : null;
       if (!entry.isDirectory() && !entryStat?.isDirectory()) continue;
-      if (!(await statPath(path.join(absoluteSkillDir, "SKILL.md")))?.isFile()) continue;
+      if (!(await statExactPath(path.join(absoluteSkillDir, "SKILL.md")))?.isFile()) continue;
       discovered.set(absoluteSkillDir, {
         directoryRoot: relativeRoot,
         relativePath: normalizePortablePath(path.relative(workspaceRoot, absoluteSkillDir)),
@@ -4852,7 +4879,7 @@ export function companySkillService(db: Db) {
         path: entryPath,
         kind: entry.isDirectory() ? "directory" : "file",
         isSkill: entry.isDirectory()
-          ? Boolean((await statPath(path.join(targetPath, entry.name, "SKILL.md")))?.isFile())
+          ? Boolean((await statExactPath(path.join(targetPath, entry.name, "SKILL.md")))?.isFile())
           : entry.name === "SKILL.md",
       });
     }

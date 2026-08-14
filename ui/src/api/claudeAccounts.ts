@@ -1,6 +1,7 @@
 import type {
   Agent,
   ClaudeAccountAssignment,
+  ClaudeAccountLoginCodeSubmission,
   ClaudeAccountLoginState,
   ClaudeAccountsOverview,
 } from "@paperclipai/shared";
@@ -16,6 +17,14 @@ export const claudeAccountsApi = {
     api.post<ClaudeAccountsOverview["accounts"][number]>(basePath(companyId), { name }),
   startLogin: (companyId: string, accountId: string) =>
     api.post<ClaudeAccountLoginState>(`${basePath(companyId)}/${encodeURIComponent(accountId)}/login`, {}),
+  submitLoginCode: (
+    companyId: string,
+    accountId: string,
+    submission: ClaudeAccountLoginCodeSubmission,
+  ) => api.post<ClaudeAccountLoginState>(
+    `${basePath(companyId)}/${encodeURIComponent(accountId)}/login/code`,
+    submission,
+  ),
   assignAgent: (companyId: string, agentId: string, assignment: ClaudeAccountAssignment) =>
     api.put<Agent>(`${basePath(companyId)}/agents/${encodeURIComponent(agentId)}`, assignment),
   remove: (companyId: string, accountId: string) =>

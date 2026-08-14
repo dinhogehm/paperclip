@@ -23,6 +23,8 @@ Some adapters also inject `PAPERCLIP_WAKE_PAYLOAD_JSON` on comment-driven wakes.
 
 Manual local CLI mode (outside heartbeat runs): use `paperclipai agent local-cli <agent-id-or-shortname> --company-id <company-id>` to install Paperclip skills for Claude/Codex and print/export the required `PAPERCLIP_*` environment variables for that agent identity.
 
+**CLI safety — use `pnpm exec paperclipai` for content-bearing arguments.** When you run the Paperclip CLI, use `pnpm exec paperclipai` for any argument that can hold untrusted content. Untrusted content includes issue text, comment bodies, Markdown, pasted snippets, and model output. `pnpm exec` runs the installed binary directly and passes the argument as an inert `argv` value. Do not use `pnpm paperclipai` for such an argument. The safe form and the unsafe form differ only by the `exec` keyword, so read the command with care. `pnpm paperclipai` is a `package.json` script; `pnpm` runs the argument through `/bin/sh` first. The shell then interprets a backtick pair, `$( )`, `$NAME`, and `; | & < >` before the CLI starts. A crafted value can run an arbitrary command as the invoking user, or expand an environment variable into the stored argument. `npx paperclipai` is also injection-safe; use it when no local install is present. See `doc/CLI.md` for the full safe/unsafe matrix.
+
 **Run audit trail:** You MUST include `-H 'X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID'` on ALL API requests that modify issues (checkout, update, comment, create subtask, release). This links your actions to the current heartbeat run for traceability.
 
 ## The Heartbeat Procedure
@@ -177,7 +179,7 @@ Run-scoped writes are subtree-scoped: the delegate's run can write to its own is
 
 ## Managing A User's Inbox
 
-Agents may archive an issue from a user's Mine inbox with `POST /api/issues/{issueId}/inbox-archive` and reverse it with `DELETE /api/issues/{issueId}/inbox-archive`. Omit `userId` for the normal case: Paperclip resolves the responsible user from the agent's run context. An explicit `userId` targets another user and requires a matching `inbox:manage` grant.
+Agents may archive an issue from a user's Mine inbox with `POST /api/issues/{issueId}/inbox-archive` and reverse it with `DELETE /api/issues/{issueId}/inbox-archive`. Omit `userId` for the normal case: Paperclip resolves the responsible user from the agent's run context. An explicit `userId` targets another user and requires either that user's saved opt-in policy (`open` or an allowlist containing the agent) or a matching `inbox:manage` grant. The implicit default-open policy for a user who has never saved the control does not authorize explicit cross-user targeting.
 
 Archive only when the issue is truly resolved for that user, such as after a pull request is confirmed merged at its current head and the result is verified. Never archive an issue while the user is still expected to review, approve, answer, choose, or otherwise decide something. Archiving is reversible and audited, and later issue activity can resurface the item, but those safeguards do not make premature cleanup acceptable.
 

@@ -31,6 +31,7 @@ describe("readBuildCommit", () => {
     expect(
       readBuildCommit({
         environmentCommit: null,
+        platformCommit: null,
         buildCommitPath: "/app/.paperclip-build-commit",
         readTextFile: (path) => {
           expect(path).toBe("/app/.paperclip-build-commit");
@@ -38,5 +39,18 @@ describe("readBuildCommit", () => {
         },
       }),
     ).toBe("0123456789abcdef0123456789abcdef01234567");
+  });
+
+  it("uses the Railway source commit when the image has no explicit build commit", () => {
+    const readTextFile = vi.fn(() => "ffffffffffffffffffffffffffffffffffffffff");
+
+    expect(
+      readBuildCommit({
+        environmentCommit: null,
+        platformCommit: "89abcdef0123456789abcdef0123456789abcdef",
+        readTextFile,
+      }),
+    ).toBe("89abcdef0123456789abcdef0123456789abcdef");
+    expect(readTextFile).not.toHaveBeenCalled();
   });
 });
