@@ -1485,6 +1485,48 @@
       "when": 1786538487555,
       "tag": "0213_oval_jamie_braddock",
       "breakpoints": true
+    },
+    {
+      "idx": 214,
+      "version": "7",
+      "when": 1786538487556,
+      "tag": "0214_onboarding_first_task_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 215,
+      "version": "7",
+      "when": 1786538487557,
+      "tag": "0215_complete_mystique",
+      "breakpoints": true
+    },
+    {
+      "idx": 216,
+      "version": "7",
+      "when": 1786538487558,
+      "tag": "0216_lively_lord_tyger",
+      "breakpoints": true
+    },
+    {
+      "idx": 217,
+      "version": "7",
+      "when": 1786538487559,
+      "tag": "0217_flat_daimon_hellstrom",
+      "breakpoints": true
+    },
+    {
+      "idx": 218,
+      "version": "7",
+      "when": 1786538487560,
+      "tag": "0218_company_onboarding_seeds",
+      "breakpoints": true
+    },
+    {
+      "idx": 219,
+      "version": "7",
+      "when": 1786643974972,
+      "tag": "0219_yielding_starbolt",
+      "breakpoints": true
     }
   ]
 }
