@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { and, asc, eq, inArray, ne } from "drizzle-orm";
+import { and, asc, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, codexAccounts, heartbeatRuns } from "@paperclipai/db";
 import type {
@@ -21,6 +21,7 @@ import {
 } from "@paperclipai/adapter-codex-local/server";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { agentService } from "./agents.js";
+import { MANAGED_ACCOUNT_SESSION_LIMIT } from "./llm-capacity.js";
 
 const LOGIN_LIFETIME_MS = 15 * 60 * 1000;
 const LOGIN_PROMPT_WAIT_MS = 15_000;
@@ -196,6 +197,21 @@ export function codexAccountIdFromRunContext(value: unknown): string | null {
     : null;
 }
 
+export function codexBusyAccountIdsFromRuns(
+  runs: Array<{ id: string; status: string; contextSnapshot: unknown }>,
+  excludeRunId?: string,
+): string[] {
+  return runs.flatMap((run) => {
+    // Account selection happens only after queued -> running is claimed. A queued
+    // retry may still carry the previous attempt's account in context, but it is
+    // not consuming a provider session. Counting it here creates a pseudo-lease
+    // that can leave a real account idle indefinitely.
+    if (run.status !== "running" || run.id === excludeRunId) return [];
+    const accountId = codexAccountIdFromRunContext(run.contextSnapshot);
+    return accountId ? [accountId] : [];
+  });
+}
+
 export async function withCodexAccountSelectionLock<T>(
   companyId: string,
   task: () => Promise<T>,
@@ -279,7 +295,10 @@ export async function selectFirstAvailableCodexAccount(input: {
     unknown: 1,
     exhausted_fallback: 2,
   };
-  selections.sort((left, right) => {
+  const withinSessionLimit = selections.filter(
+    (selection) => selection.activeRuns < MANAGED_ACCOUNT_SESSION_LIMIT,
+  );
+  withinSessionLimit.sort((left, right) => {
     const exhaustedDelta = Number(left.quotaState === "exhausted_fallback")
       - Number(right.quotaState === "exhausted_fallback");
     if (exhaustedDelta !== 0) return exhaustedDelta;
@@ -292,7 +311,7 @@ export async function selectFirstAvailableCodexAccount(input: {
     if (leftPressure !== rightPressure) return leftPressure - rightPressure;
     return left.activeRuns - right.activeRuns;
   });
-  const selection = selections[0];
+  const selection = withinSessionLimit[0];
   return selection
     ? {
         accountId: selection.accountId,
@@ -306,6 +325,7 @@ export async function selectFirstAvailableCodexAccount(input: {
 export async function resolveFirstAvailableCodexAccount(
   db: Db,
   companyId: string,
+  opts?: { excludeRunId?: string },
 ): Promise<FirstAvailableCodexAccountSelection | null> {
   const [accountRows, busyRows] = await Promise.all([
     db
@@ -319,12 +339,14 @@ export async function resolveFirstAvailableCodexAccount(
       .orderBy(asc(codexAccounts.createdAt)),
     db
       .select({
+        id: heartbeatRuns.id,
+        status: heartbeatRuns.status,
         contextSnapshot: heartbeatRuns.contextSnapshot,
       })
       .from(heartbeatRuns)
       .where(and(
         eq(heartbeatRuns.companyId, companyId),
-        inArray(heartbeatRuns.status, ["queued", "running"]),
+        eq(heartbeatRuns.status, "running"),
       )),
   ]);
   return selectFirstAvailableCodexAccount({
@@ -333,10 +355,7 @@ export async function resolveFirstAvailableCodexAccount(
     // expression. Some embedded-postgres/driver combinations return this
     // column serialized; the SQL path then yielded no reservations and every
     // worker fell back to the first account.
-    busyAccountIds: busyRows.flatMap((row) => {
-      const accountId = codexAccountIdFromRunContext(row.contextSnapshot);
-      return accountId ? [accountId] : [];
-    }),
+    busyAccountIds: codexBusyAccountIdsFromRuns(busyRows, opts?.excludeRunId),
   });
 }
 

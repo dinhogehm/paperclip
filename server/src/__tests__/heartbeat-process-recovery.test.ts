@@ -3991,6 +3991,41 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     );
   });
 
+  it("cancels a queued run with a compare-and-set without signalling a process", async () => {
+    const { runId } = await seedRunFixture({
+      agentStatus: "idle",
+      runStatus: "queued",
+      includeIssue: false,
+      processPid: 12345,
+    });
+    const heartbeat = heartbeatService(db);
+    mockTerminateLocalService.mockClear();
+
+    const result = await heartbeat.cancelQueuedRun(runId, "dispatcher rebalance");
+
+    expect(result.cancelled).toBe(true);
+    expect(result.run?.status).toBe("cancelled");
+    expect(mockTerminateLocalService).not.toHaveBeenCalled();
+  });
+
+  it("refuses queued-only cancellation after the run is already running", async () => {
+    const { runId } = await seedRunFixture({
+      agentStatus: "running",
+      runStatus: "running",
+      includeIssue: false,
+      processPid: 12345,
+    });
+    const heartbeat = heartbeatService(db);
+    mockTerminateLocalService.mockClear();
+
+    const result = await heartbeat.cancelQueuedRun(runId, "dispatcher rebalance");
+
+    expect(result.cancelled).toBe(false);
+    expect(result.run?.status).toBe("running");
+    expect(mockTerminateLocalService).not.toHaveBeenCalled();
+    await expect(heartbeat.getRun(runId)).resolves.toMatchObject({ status: "running" });
+  });
+
   it("preserves first-heartbeat telemetry after a timer interval claim", async () => {
     const { agentId, runId } = await seedRunFixture({
       agentStatus: "running",

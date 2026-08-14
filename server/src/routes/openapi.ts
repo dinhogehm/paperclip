@@ -784,6 +784,8 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/board-api-keys",
   "DELETE /api/board-api-keys/{keyId}",
   "POST /api/bootstrap/claim",
+  "POST /api/heartbeat-runs/{runId}/cancel",
+  "POST /api/heartbeat-runs/{runId}/cancel-queued",
   "GET /api/companies/{companyId}/resource-memberships/me",
   "PUT /api/companies/{companyId}/resource-memberships/me/agents/{agentId}",
   "PUT /api/companies/{companyId}/resource-memberships/me/documents/{documentId}",
@@ -4328,6 +4330,15 @@ registry.registerPath({
   summary: "Cancel a heartbeat run",
   request: { params: z.object({ runId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/heartbeat-runs/{runId}/cancel-queued",
+  tags: ["runs"],
+  summary: "Cancel a heartbeat run only while it is still queued",
+  request: { params: z.object({ runId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound, 409: r.conflict },
 });
 
 registry.registerPath({

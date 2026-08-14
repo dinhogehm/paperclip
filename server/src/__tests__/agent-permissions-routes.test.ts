@@ -82,6 +82,7 @@ const mockHeartbeatService = vi.hoisted(() => ({
   resetRuntimeSession: vi.fn(),
   getRun: vi.fn(),
   cancelRun: vi.fn(),
+  cancelQueuedRun: vi.fn(),
   cancelInvocationsForAgents: vi.fn(),
 }));
 
@@ -332,6 +333,7 @@ describe.sequential("agent permission routes", () => {
     mockHeartbeatService.resetRuntimeSession.mockReset();
     mockHeartbeatService.getRun.mockReset();
     mockHeartbeatService.cancelRun.mockReset();
+    mockHeartbeatService.cancelQueuedRun.mockReset();
     mockHeartbeatService.cancelInvocationsForAgents.mockReset();
     mockIssueApprovalService.linkManyForApproval.mockReset();
     mockIssueService.list.mockReset();
@@ -1878,6 +1880,33 @@ describe.sequential("agent permission routes", () => {
 
     expect(res.status).toBe(404);
     expect(res.body.error).toBe("Heartbeat run not found");
+    expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+  });
+
+  it("returns conflict instead of cancelling when a queued run has started", async () => {
+    const running = {
+      id: "run-1",
+      companyId,
+      agentId,
+      status: "running",
+    };
+    mockHeartbeatService.getRun.mockResolvedValue(running);
+    mockHeartbeatService.cancelQueuedRun.mockResolvedValue({ run: running, cancelled: false });
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post("/api/heartbeat-runs/run-1/cancel-queued").send({}),
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ error: "heartbeat_run_not_queued", status: "running" });
     expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
   });
 });

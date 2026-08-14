@@ -3790,7 +3790,7 @@ export function agentRoutes(
     // every caller with no minCount param gets up to 50 historical runs
     // padded in and renders bogus "live" counts.
     const minCount = readLiveRunsQueryInt(req.query.minCount, 50, 0);
-    const limit = readLiveRunsQueryInt(req.query.limit, 50, 50);
+    const limit = readLiveRunsQueryInt(req.query.limit, 1000, 50);
 
     const columns = {
       id: heartbeatRuns.id,
@@ -3909,6 +3909,41 @@ export function agentRoutes(
     }
 
     res.json(run);
+  });
+
+  router.post("/heartbeat-runs/:runId/cancel-queued", async (req, res) => {
+    assertBoard(req);
+    const runId = req.params.runId as string;
+    const existing = await getAccessibleResource(req, res, heartbeat.getRun(runId), "Heartbeat run not found");
+    if (!existing) return;
+
+    const result = await heartbeat.cancelQueuedRun(runId, "Queued run cancelled by dispatcher", {
+      resultJson: {
+        cancelledByActorType: "user",
+        cancelledByUserId: req.actor.userId ?? null,
+        queuedOnly: true,
+      },
+      eventMessage: "queued run cancelled by dispatcher",
+      eventPayload: { queuedOnly: true },
+    });
+    if (!result.cancelled || !result.run) {
+      res.status(409).json({
+        error: "heartbeat_run_not_queued",
+        status: result.run?.status ?? null,
+      });
+      return;
+    }
+
+    await logActivity(db, {
+      companyId: result.run.companyId,
+      actorType: "user",
+      actorId: req.actor.userId ?? "board",
+      action: "heartbeat.cancelled",
+      entityType: "heartbeat_run",
+      entityId: result.run.id,
+      details: { agentId: result.run.agentId, queuedOnly: true },
+    });
+    res.json(result.run);
   });
 
   router.post("/heartbeat-runs/:runId/watchdog-decisions", async (req, res) => {

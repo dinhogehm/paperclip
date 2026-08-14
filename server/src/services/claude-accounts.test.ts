@@ -69,6 +69,25 @@ describe("Claude account selection", () => {
     expect(selection).toMatchObject({ accountId: "account-2", accountName: "Secondary" });
   });
 
+  it("allows two sessions per account and rejects a third", async () => {
+    const accounts = [{ id: "account-1", companyId: "company-1", name: "Primary" }];
+    const second = await selectFirstAvailableClaudeAccount({
+      accounts,
+      busyAccountIds: ["account-1"],
+      readAuthStatus: async () => authenticated,
+      readQuota: async () => quota(20),
+    });
+    expect(second?.accountId).toBe("account-1");
+
+    const third = await selectFirstAvailableClaudeAccount({
+      accounts,
+      busyAccountIds: ["account-1", "account-1"],
+      readAuthStatus: async () => authenticated,
+      readQuota: async () => quota(20),
+    });
+    expect(third).toBeNull();
+  });
+
   it("ignores profiles that are not authenticated through claude.ai", async () => {
     const selection = await selectFirstAvailableClaudeAccount({
       accounts: [{ id: "account-1", companyId: "company-1", name: "API login" }],

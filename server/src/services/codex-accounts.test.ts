@@ -178,6 +178,25 @@ describe("Codex account device login", () => {
     });
   });
 
+  it("allows two sessions per account and rejects a third", async () => {
+    const accounts = [{ id: "account-1", companyId: "company-1", name: "Primary" }];
+    const second = await selectFirstAvailableCodexAccount({
+      accounts,
+      busyAccountIds: ["account-1"],
+      readAuthInfo: async () => authenticated,
+      fetchQuota: async () => [quotaWindow(20)],
+    });
+    expect(second?.accountId).toBe("account-1");
+
+    const third = await selectFirstAvailableCodexAccount({
+      accounts,
+      busyAccountIds: ["account-1", "account-1"],
+      readAuthInfo: async () => authenticated,
+      fetchQuota: async () => [quotaWindow(20)],
+    });
+    expect(third).toBeNull();
+  });
+
   it("prefers quota headroom over an account close to its weekly limit", async () => {
     const selection = await selectFirstAvailableCodexAccount({
       accounts: [
