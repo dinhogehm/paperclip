@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -438,16 +438,91 @@ function buildClaudeCliShellProbeCommand(executable = "claude"): string {
   return `${feed} | script -q -e -f -c ${quoteForShell(claudeCommand)} /dev/null`;
 }
 
+function capturedProbeError(message: string, stdout: string, stderr: string): Error {
+  return Object.assign(new Error(message), { stdout, stderr });
+}
+
 export async function captureClaudeCliUsageText(
   timeoutMs = 12_000,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<string> {
-  const command = buildClaudeCliShellProbeCommand(env.PAPERCLIP_CLAUDE_EXECUTABLE?.trim() || "claude");
+  const command = buildClaudeCliShellProbeCommand(
+    env.PAPERCLIP_CLAUDE_EXECUTABLE?.trim() || "claude",
+  );
   try {
-    const { stdout, stderr } = await execFileAsync("sh", ["-c", command], {
-      env: createClaudeQuotaEnv(env),
-      timeout: timeoutMs,
-      maxBuffer: 8 * 1024 * 1024,
+    const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      // Keep the shell pipeline: on macOS, `script` rejects the socket-backed
+      // stdin created by Node's `stdio: "pipe"`. A detached shell gives the
+      // feeder and `script` a stable process group; terminating `script` also
+      // closes its PTY and hangs up the Claude child.
+      const child = spawn("sh", ["-c", command], {
+        env: createClaudeQuotaEnv(env),
+        detached: process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const maxChars = 8 * 1024 * 1024;
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      let timedOut = false;
+      let timeoutTimer: NodeJS.Timeout | null = null;
+      let forceKillTimer: NodeJS.Timeout | null = null;
+
+      const append = (current: string, chunk: Buffer | string) => {
+        const next = `${current}${String(chunk)}`;
+        return next.length > maxChars ? next.slice(-maxChars) : next;
+      };
+      child.stdout.on("data", (chunk) => { stdout = append(stdout, chunk); });
+      child.stderr.on("data", (chunk) => { stderr = append(stderr, chunk); });
+
+      const terminateGroup = (signal: NodeJS.Signals) => {
+        if (!child.pid) return;
+        try {
+          if (process.platform !== "win32") process.kill(-child.pid, signal);
+          else child.kill(signal);
+        } catch {
+          // The process group already exited.
+        }
+      };
+      const cleanup = () => {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        if (forceKillTimer) clearTimeout(forceKillTimer);
+      };
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) reject(Object.assign(error, { stdout, stderr }));
+        else resolve({ stdout, stderr });
+      };
+      timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        terminateGroup("SIGTERM");
+        forceKillTimer = setTimeout(() => terminateGroup("SIGKILL"), 1_000);
+        forceKillTimer.unref?.();
+      }, Math.max(1, timeoutMs));
+
+      child.once("error", (error) => finish(error));
+      child.once("close", (code, signal) => {
+        if (timedOut) {
+          // The shell can exit on SIGTERM while a descendant ignores it. Kill
+          // any remaining members before cleanup cancels the escalation timer.
+          terminateGroup("SIGKILL");
+          finish(capturedProbeError(
+            `Claude CLI usage probe timed out after ${timeoutMs}ms`,
+            stdout,
+            stderr,
+          ));
+        } else if (code === 0) {
+          finish();
+        } else {
+          finish(capturedProbeError(
+            `Claude CLI usage probe exited with ${signal ?? code ?? "unknown status"}`,
+            stdout,
+            stderr,
+          ));
+        }
+      });
     });
     const output = `${stdout}${stderr}`;
     const cleaned = cleanTerminalText(output);

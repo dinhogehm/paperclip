@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { and, asc, eq, inArray, ne } from "drizzle-orm";
+import { and, asc, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, claudeAccounts, heartbeatRuns } from "@paperclipai/db";
 import type {
@@ -16,6 +16,7 @@ import { resolvePaperclipInstanceRootForAdapter } from "@paperclipai/adapter-uti
 import { getQuotaWindows, readClaudeAuthStatus } from "@paperclipai/adapter-claude-local/server";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { agentService } from "./agents.js";
+import { MANAGED_ACCOUNT_SESSION_LIMIT } from "./llm-capacity.js";
 
 const LOGIN_LIFETIME_MS = 15 * 60 * 1000;
 const ACCOUNT_HIGH_WATER_PERCENT = 95;
@@ -152,6 +153,21 @@ export function claudeAccountIdFromRunContext(value: unknown): string | null {
     : null;
 }
 
+export function claudeBusyAccountIdsFromRuns(
+  runs: Array<{ id: string; status: string; contextSnapshot: unknown }>,
+  excludeRunId?: string,
+): string[] {
+  return runs.flatMap((run) => {
+    // Queued retries can inherit account metadata from an earlier attempt. They
+    // do not own a live provider session, so only running rows reserve capacity.
+    // Excluding the selecting run also prevents its inherited context from
+    // deadlocking itself before the fresh account choice is persisted.
+    if (run.status !== "running" || run.id === excludeRunId) return [];
+    const accountId = claudeAccountIdFromRunContext(run.contextSnapshot);
+    return accountId ? [accountId] : [];
+  });
+}
+
 export async function withClaudeAccountSelectionLock<T>(
   companyId: string,
   task: () => Promise<T>,
@@ -211,7 +227,10 @@ export async function selectFirstAvailableClaudeAccount(input: {
   }
 
   const rank = { available: 0, unknown: 1, exhausted_fallback: 2 } as const;
-  candidates.sort((left, right) => {
+  const withinSessionLimit = candidates.filter(
+    (candidate) => candidate.activeRuns < MANAGED_ACCOUNT_SESSION_LIMIT,
+  );
+  withinSessionLimit.sort((left, right) => {
     const rankDelta = rank[left.quotaState] - rank[right.quotaState];
     if (rankDelta) return rankDelta;
     const leftPressure = (left.usedPercent ?? 100) + left.activeRuns * ACTIVE_RUN_PRESSURE_PERCENT;
@@ -219,7 +238,7 @@ export async function selectFirstAvailableClaudeAccount(input: {
     if (leftPressure !== rightPressure) return leftPressure - rightPressure;
     return left.activeRuns - right.activeRuns;
   });
-  const selected = candidates[0];
+  const selected = withinSessionLimit[0];
   return selected ? {
     accountId: selected.accountId,
     accountName: selected.accountName,
@@ -231,22 +250,24 @@ export async function selectFirstAvailableClaudeAccount(input: {
 export async function resolveFirstAvailableClaudeAccount(
   db: Db,
   companyId: string,
+  opts?: { excludeRunId?: string },
 ): Promise<FirstAvailableClaudeAccountSelection | null> {
   const [accountRows, busyRows] = await Promise.all([
     db.select({ id: claudeAccounts.id, companyId: claudeAccounts.companyId, name: claudeAccounts.name })
       .from(claudeAccounts)
       .where(eq(claudeAccounts.companyId, companyId))
       .orderBy(asc(claudeAccounts.createdAt)),
-    db.select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+    db.select({
+      id: heartbeatRuns.id,
+      status: heartbeatRuns.status,
+      contextSnapshot: heartbeatRuns.contextSnapshot,
+    })
       .from(heartbeatRuns)
-      .where(and(eq(heartbeatRuns.companyId, companyId), inArray(heartbeatRuns.status, ["queued", "running"]))),
+      .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.status, "running"))),
   ]);
   return selectFirstAvailableClaudeAccount({
     accounts: accountRows,
-    busyAccountIds: busyRows.flatMap((row) => {
-      const id = claudeAccountIdFromRunContext(row.contextSnapshot);
-      return id ? [id] : [];
-    }),
+    busyAccountIds: claudeBusyAccountIdsFromRuns(busyRows, opts?.excludeRunId),
   });
 }
 

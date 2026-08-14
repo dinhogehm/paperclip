@@ -248,6 +248,15 @@ import { resolveRequiredSuccessfulRunHandoffOnValidPath } from "./successful-run
 import { taskWatchdogService } from "./task-watchdogs.js";
 import { withAgentStartLock } from "./agent-start-lock.js";
 import {
+  evaluateLlmSessionAdmission,
+  GLOBAL_LLM_SESSION_LIMIT,
+  isPrGovernanceAgent,
+  remainingSessionSlots,
+  resolvePrGovernanceReservationPolicy,
+  type PrGovernanceReservationPolicy,
+  withGlobalLlmStartLock,
+} from "./llm-capacity.js";
+import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
   shouldCancelRunsForNonInvokableAgent,
@@ -6516,6 +6525,12 @@ export interface HeartbeatServiceOptions {
   pluginWorkerManager?: PluginWorkerManager;
   environmentRuntime?: HeartbeatEnvironmentRuntime;
   runtimeEnv?: Record<string, string | undefined>;
+  /** Test synchronization hook for races immediately before the global LLM claim lock. */
+  beforeGlobalLlmClaim?: (input: {
+    runId: string;
+    agentId: string;
+    runnableGovernanceRunIds: string[];
+  }) => Promise<void>;
 }
 
 type WorkspaceReadyCommentWriter = {
@@ -11097,7 +11112,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
-
     if (!baseSchedule) {
       await appendRunEvent(run, await nextRunEventSeq(run.id), {
         eventType: "lifecycle",
@@ -12381,6 +12395,323 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return Number(count ?? 0);
   }
 
+  async function countRunningLlmSessions() {
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(heartbeatRuns)
+      .innerJoin(agents, eq(agents.id, heartbeatRuns.agentId))
+      .where(and(
+        eq(heartbeatRuns.status, "running"),
+        inArray(agents.adapterType, ["codex_local", "claude_local"]),
+      ));
+    return Number(count ?? 0);
+  }
+
+  type PrGovernanceRunnableCandidate = {
+    runId: string;
+    agentId: string;
+    maxConcurrentRuns: number;
+    bypassesBlockers: boolean;
+  };
+
+  async function revalidatePrGovernanceCapacity(
+    policy: PrGovernanceReservationPolicy,
+    runnableCandidates: PrGovernanceRunnableCandidate[],
+    cutoff: Date | null,
+  ) {
+    const normalizedCandidates = [...new Map(
+      runnableCandidates
+        .filter((candidate) => candidate.runId && candidate.agentId)
+        .map((candidate) => [candidate.runId, candidate]),
+    ).values()];
+    const normalizedAgentIds = [...new Set(policy.agentIds)].filter(Boolean);
+    if (policy.reservedSlots <= 0 || normalizedAgentIds.length === 0 || normalizedCandidates.length === 0) {
+      return { runningSessions: await countRunningLlmSessions(), governanceRunningSessions: 0, hasRunnableDemand: false };
+    }
+
+    const cutoffCondition = cutoff
+      ? sql`and candidate_run.created_at >= ${cutoff}`
+      : sql``;
+    const governanceAgentIdList = sql.join(normalizedAgentIds.map((id) => sql`${id}::uuid`), sql`, `);
+    const runnableCandidateValues = sql.join(
+      normalizedCandidates.map((candidate) => sql`(
+        ${candidate.runId}::uuid,
+        ${candidate.agentId}::uuid,
+        ${candidate.maxConcurrentRuns}::integer,
+        ${candidate.bypassesBlockers}::boolean
+      )`),
+      sql`, `,
+    );
+    const [row] = await db.execute<{
+      running_sessions: number | string;
+      governance_running_sessions: number | string;
+      has_runnable_demand: boolean;
+    }>(sql`
+      select
+        (
+          select count(*)::integer
+          from heartbeat_runs running_run
+          join agents running_agent on running_agent.id = running_run.agent_id
+          where running_run.status = 'running'
+            and running_agent.adapter_type in ('codex_local', 'claude_local')
+        ) as running_sessions,
+        (
+          select count(*)::integer
+          from heartbeat_runs governance_run
+          join agents governance_agent on governance_agent.id = governance_run.agent_id
+          join companies governance_company on governance_company.id = governance_run.company_id
+          where governance_run.status = 'running'
+            and governance_run.agent_id in (${governanceAgentIdList})
+            and governance_agent.adapter_type in ('codex_local', 'claude_local')
+            and governance_company.status = 'active'
+        ) as governance_running_sessions,
+        exists (
+          select 1
+          from (values ${runnableCandidateValues})
+            as runnable_candidate(run_id, agent_id, max_concurrent_runs, bypasses_blockers)
+          join heartbeat_runs candidate_run
+            on candidate_run.id = runnable_candidate.run_id
+           and candidate_run.agent_id = runnable_candidate.agent_id
+          join agents candidate_agent on candidate_agent.id = candidate_run.agent_id
+          join companies candidate_company on candidate_company.id = candidate_run.company_id
+          join issues candidate_issue
+            on candidate_issue.company_id = candidate_run.company_id
+           and candidate_issue.id::text = candidate_run.context_snapshot ->> 'issueId'
+          where candidate_run.status = 'queued'
+            and candidate_run.agent_id in (${governanceAgentIdList})
+            and candidate_agent.adapter_type in ('codex_local', 'claude_local')
+            and candidate_company.status = 'active'
+            and candidate_issue.status in ('todo', 'in_progress', 'in_review')
+            and candidate_issue.hidden_at is null
+            ${cutoffCondition}
+            and (
+              select count(*)::integer
+              from heartbeat_runs candidate_agent_run
+              where candidate_agent_run.agent_id = candidate_run.agent_id
+                and candidate_agent_run.status = 'running'
+            ) < runnable_candidate.max_concurrent_runs
+            and (
+              runnable_candidate.bypasses_blockers
+              or not exists (
+                select 1
+                from issue_relations blocker_relation
+                join issues blocker_issue
+                  on blocker_issue.id = blocker_relation.issue_id
+                 and blocker_issue.company_id = candidate_issue.company_id
+                where blocker_relation.company_id = candidate_issue.company_id
+                  and blocker_relation.related_issue_id = candidate_issue.id
+                  and blocker_relation.type = 'blocks'
+                  -- Dependency readiness treats only done as resolved; cancelled
+                  -- blockers continue to block until their relation is changed.
+                  and blocker_issue.status <> 'done'
+              )
+            )
+        ) as has_runnable_demand
+    `);
+    return {
+      runningSessions: Number(row?.running_sessions ?? 0),
+      governanceRunningSessions: Number(row?.governance_running_sessions ?? 0),
+      hasRunnableDemand: row?.has_runnable_demand === true,
+    };
+  }
+
+  type PrGovernanceDemand = {
+    governanceRunningSessions: number;
+    hasRunnableDemand: boolean;
+    runnableAgentIds: string[];
+    runnableRunIds: string[];
+    runnableCandidates: PrGovernanceRunnableCandidate[];
+  };
+
+  async function inspectPrGovernanceDemand(
+    policy: PrGovernanceReservationPolicy,
+    cutoff: Date | null,
+  ): Promise<PrGovernanceDemand> {
+    if (policy.reservedSlots <= 0 || policy.agentIds.length === 0) {
+      return {
+        governanceRunningSessions: 0,
+        hasRunnableDemand: false,
+        runnableAgentIds: [],
+        runnableRunIds: [],
+        runnableCandidates: [],
+      };
+    }
+
+    const governanceAgents = await db
+      .select({ ...getTableColumns(agents) })
+      .from(agents)
+      .innerJoin(companies, eq(companies.id, agents.companyId))
+      .where(and(
+        inArray(agents.id, policy.agentIds),
+        inArray(agents.adapterType, ["codex_local", "claude_local"]),
+        eq(companies.status, "active"),
+      ));
+    if (governanceAgents.length === 0) {
+      return {
+        governanceRunningSessions: 0,
+        hasRunnableDemand: false,
+        runnableAgentIds: [],
+        runnableRunIds: [],
+        runnableCandidates: [],
+      };
+    }
+
+    const governanceAgentIds = governanceAgents.map((agent) => agent.id);
+    const runningRows = await db
+      .select({
+        agentId: heartbeatRuns.agentId,
+        count: sql<number>`count(*)`,
+      })
+      .from(heartbeatRuns)
+      .where(and(
+        inArray(heartbeatRuns.agentId, governanceAgentIds),
+        eq(heartbeatRuns.status, "running"),
+      ))
+      .groupBy(heartbeatRuns.agentId);
+    const runningByAgent = new Map(
+      runningRows.map((row) => [row.agentId, Number(row.count ?? 0)]),
+    );
+    const governanceRunningSessions = [...runningByAgent.values()]
+      .reduce((total, count) => total + count, 0);
+    const queuedRuns = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(and(
+        inArray(heartbeatRuns.agentId, governanceAgentIds),
+        eq(heartbeatRuns.status, "queued"),
+        cutoff ? gte(heartbeatRuns.createdAt, cutoff) : undefined,
+      ))
+      .orderBy(asc(heartbeatRuns.createdAt));
+    if (queuedRuns.length === 0) {
+      return {
+        governanceRunningSessions,
+        hasRunnableDemand: false,
+        runnableAgentIds: [],
+        runnableRunIds: [],
+        runnableCandidates: [],
+      };
+    }
+
+    const agentById = new Map(governanceAgents.map((agent) => [agent.id, agent]));
+    const queuedIssueIds = [...new Set(
+      queuedRuns
+        .map((run) => readNonEmptyString(parseObject(run.contextSnapshot).issueId))
+        .filter((issueId): issueId is string => Boolean(issueId)),
+    )];
+    const issueRows = queuedIssueIds.length > 0
+      ? await db
+        .select({ id: issues.id, status: issues.status, priority: issues.priority })
+        .from(issues)
+        .where(inArray(issues.id, queuedIssueIds))
+      : [];
+    const issueById = new Map(issueRows.map((issue) => [issue.id, issue]));
+    const companyOrgRows = new Map<string, AgentOrgRow[]>();
+    const runnableAgents = new Map<string, {
+      statusRank: number;
+      priorityRank: number;
+      createdAt: Date;
+    }>();
+    const runnableRunIds: string[] = [];
+    const runnableCandidates: PrGovernanceRunnableCandidate[] = [];
+
+    for (const run of queuedRuns) {
+      const agent = agentById.get(run.agentId);
+      if (!agent) continue;
+      const context = parseObject(run.contextSnapshot);
+      const issueId = readNonEmptyString(context.issueId);
+      // Unscoped maintenance/timer runs must never hold delivery capacity open.
+      if (!issueId) continue;
+      const issue = issueById.get(issueId);
+      // Reservation protects work that can start now. Backlog, blocked, terminal,
+      // or missing issues must not reduce delivery capacity.
+      if (!issue || !["todo", "in_progress", "in_review"].includes(issue.status)) continue;
+      // Keep candidates from agents that are currently at their concurrency cap.
+      // A governance run may finish after this preflight but before the delivery
+      // claim acquires the global lock; the compact recheck below decides whether
+      // the candidate has capacity at the authoritative point in time.
+      const maxConcurrentRuns = parseHeartbeatPolicy(agent).maxConcurrentRuns;
+
+      let orgRows = companyOrgRows.get(agent.companyId);
+      if (!orgRows) {
+        orgRows = await listCompanyAgentOrgRows(agent.companyId);
+        companyOrgRows.set(agent.companyId, orgRows);
+      }
+      const invokability = evaluateAgentInvokability(toAgentOrgRow(agent), orgRows);
+      if (!invokability.invokable) continue;
+
+      const budgetBlock = await budgets.getInvocationBlock(run.companyId, run.agentId, {
+        issueId,
+        projectId: readNonEmptyString(context.projectId),
+      });
+      if (budgetBlock) continue;
+      const dailyCapBlock = await getHeartbeatDailyCapBlock(agent, parseHeartbeatPolicy(agent), {
+        excludeRunId: run.id,
+        checkRunCap: true,
+        checkCostCap: true,
+      });
+      if (dailyCapBlock) continue;
+
+      const activePauseHold = await treeControlSvc.getActivePauseHoldGate(run.companyId, issueId);
+      const treeHoldInteractionWake = activePauseHold && await isVerifiedIssueTreeControlInteractionWake(db, {
+        companyId: run.companyId,
+        issueId,
+        agentId: run.agentId,
+        runId: run.id,
+        wakeupRequestId: run.wakeupRequestId,
+        contextSnapshot: context,
+      });
+      if (activePauseHold && !treeHoldInteractionWake) continue;
+
+      const dependencyReadiness = await issuesSvc.listDependencyReadiness(run.companyId, [issueId]);
+      const readiness = dependencyReadiness.get(issueId);
+      if ((readiness?.unresolvedBlockerCount ?? 0) > 0 && !allowsIssueInteractionWake(context)) continue;
+
+      const staleness = await evaluateQueuedRunStaleness(run, issueId, context);
+      if (staleness.stale) continue;
+      runnableRunIds.push(run.id);
+      runnableCandidates.push({
+        runId: run.id,
+        agentId: agent.id,
+        maxConcurrentRuns,
+        bypassesBlockers: allowsIssueInteractionWake(context),
+      });
+      const candidate = {
+        statusRank: issue?.status === "in_progress" ? 0 : 1,
+        priorityRank: issueRunPriorityRank(issue?.priority),
+        createdAt: run.createdAt,
+      };
+      const existing = runnableAgents.get(agent.id);
+      if (
+        !existing ||
+        candidate.statusRank < existing.statusRank ||
+        (candidate.statusRank === existing.statusRank && candidate.priorityRank < existing.priorityRank) ||
+        (
+          candidate.statusRank === existing.statusRank &&
+          candidate.priorityRank === existing.priorityRank &&
+          candidate.createdAt.getTime() < existing.createdAt.getTime()
+        )
+      ) {
+        runnableAgents.set(agent.id, candidate);
+      }
+    }
+
+    const runnableAgentIds = [...runnableAgents.entries()]
+      .sort(([, left], [, right]) =>
+        left.statusRank - right.statusRank ||
+        left.priorityRank - right.priorityRank ||
+        left.createdAt.getTime() - right.createdAt.getTime()
+      )
+      .map(([agentId]) => agentId);
+
+    return {
+      governanceRunningSessions,
+      hasRunnableDemand: runnableAgentIds.length > 0,
+      runnableAgentIds,
+      runnableRunIds,
+      runnableCandidates,
+    };
+  }
+
   async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect, companyAgents?: AgentOrgRow[]) {
     if (run.status !== "queued") return run;
     const agent = await getAgent(run.agentId);
@@ -12477,17 +12808,92 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueContext: issueId ? await getIssueExecutionContext(run.companyId, issueId) : null,
       routineEnvContext: { routineId: null, env: null, responsibleUserId: null },
     });
-    const claimed = await db
-      .update(heartbeatRuns)
-      .set({
-        status: "running",
-        responsibleUserId,
-        startedAt: run.startedAt ?? claimedAt,
-        updatedAt: claimedAt,
-      })
-      .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")))
-      .returning()
-      .then((rows) => rows[0] ?? null);
+    const isLlmAgent = agent.adapterType === "codex_local" || agent.adapterType === "claude_local";
+    const reservationPolicy = resolvePrGovernanceReservationPolicy(runtimeEnv);
+    const reservationCutoff = isLlmAgent ? await getWorktreeExecutionCutoff() : null;
+    const reservationDemandSnapshot = isLlmAgent && !isPrGovernanceAgent(reservationPolicy, agent.id)
+      ? await inspectPrGovernanceDemand(reservationPolicy, reservationCutoff)
+      : {
+          governanceRunningSessions: 0,
+          hasRunnableDemand: false,
+          runnableAgentIds: [],
+          runnableRunIds: [],
+          runnableCandidates: [],
+        };
+    if (isLlmAgent) {
+      await options.beforeGlobalLlmClaim?.({
+        runId: run.id,
+        agentId: agent.id,
+        runnableGovernanceRunIds: reservationDemandSnapshot.runnableRunIds,
+      });
+    }
+    const claimed = await withGlobalLlmStartLock(async () => {
+      if (isLlmAgent) {
+        const capacitySnapshot = reservationDemandSnapshot.hasRunnableDemand
+          ? await revalidatePrGovernanceCapacity(
+              reservationPolicy,
+              reservationDemandSnapshot.runnableCandidates,
+              reservationCutoff,
+            )
+          : {
+              runningSessions: await countRunningLlmSessions(),
+              governanceRunningSessions: 0,
+              hasRunnableDemand: false,
+            };
+        const runningSessions = capacitySnapshot.runningSessions;
+        if (remainingSessionSlots(GLOBAL_LLM_SESSION_LIMIT, runningSessions) <= 0) {
+          logger.info(
+            {
+              runId: run.id,
+              agentId: run.agentId,
+              globalLimit: GLOBAL_LLM_SESSION_LIMIT,
+              runningSessions,
+            },
+            "claimQueuedRun: global LLM capacity is full; leaving run queued",
+          );
+          return null;
+        }
+        const governanceRunningSessions = capacitySnapshot.governanceRunningSessions;
+        const hasRunnableGovernanceDemand = capacitySnapshot.hasRunnableDemand &&
+          governanceRunningSessions < reservationPolicy.reservedSlots;
+        const admission = evaluateLlmSessionAdmission({
+          agentId: agent.id,
+          runningSessions,
+          governanceRunningSessions,
+          hasRunnableGovernanceDemand,
+          policy: reservationPolicy,
+        });
+        if (!admission.allowed) {
+          logger.info(
+            {
+              runId: run.id,
+              agentId: run.agentId,
+              globalLimit: GLOBAL_LLM_SESSION_LIMIT,
+              runningSessions,
+              reason: admission.reason,
+              reservedSlotsNeeded: admission.reservedSlotsNeeded,
+              governanceAgentIds: reservationPolicy.agentIds,
+            },
+            admission.reason === "pr_governance_reservation"
+              ? "claimQueuedRun: preserving LLM capacity for runnable PR governance work"
+              : "claimQueuedRun: global LLM capacity is full; leaving run queued",
+          );
+          return null;
+        }
+      }
+
+      return db
+        .update(heartbeatRuns)
+        .set({
+          status: "running",
+          responsibleUserId,
+          startedAt: run.startedAt ?? claimedAt,
+          updatedAt: claimedAt,
+        })
+        .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")))
+        .returning()
+        .then((rows) => rows[0] ?? null);
+    });
     if (!claimed) return null;
 
     publishLiveEvent({
@@ -13282,7 +13688,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await finalizeAgentStatus(run.agentId, "failed", baseMessage, {
         wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
       });
-      await startNextQueuedRunForAgent(run.agentId);
+      await refillCapacityAfterRun(run.agentId);
       runningProcesses.delete(run.id);
       reaped.push(run.id);
     }
@@ -13307,7 +13713,24 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         cutoff ? gte(heartbeatRuns.createdAt, cutoff) : undefined,
       ));
 
-    const agentIds = [...new Set(queuedRuns.map((r) => r.agentId))];
+    const reservationPolicy = resolvePrGovernanceReservationPolicy(runtimeEnv);
+    const queuedAgentIds = [...new Set(queuedRuns.map((r) => r.agentId))];
+    const demand = remainingSessionSlots(GLOBAL_LLM_SESSION_LIMIT, await countRunningLlmSessions()) > 0
+      ? await inspectPrGovernanceDemand(reservationPolicy, cutoff)
+      : {
+          governanceRunningSessions: 0,
+          hasRunnableDemand: false,
+          runnableAgentIds: [],
+          runnableRunIds: [],
+          runnableCandidates: [],
+        };
+    const priorityGovernanceAgentIds = demand.hasRunnableDemand
+      ? demand.runnableAgentIds.filter((agentId) => queuedAgentIds.includes(agentId))
+      : [];
+    const agentIds = [
+      ...priorityGovernanceAgentIds,
+      ...queuedAgentIds.filter((agentId) => !priorityGovernanceAgentIds.includes(agentId)),
+    ];
     for (const agentId of agentIds) {
       await startNextQueuedRunForAgent(agentId);
     }
@@ -13448,6 +13871,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
         return [];
       }
+      // Advisory fast path only: avoid loading and validating every queued run
+      // while the host is already full. claimQueuedRun keeps the authoritative
+      // capacity check under the global lock immediately before its status CAS.
+      if (
+        (agent.adapterType === "codex_local" || agent.adapterType === "claude_local")
+        && remainingSessionSlots(GLOBAL_LLM_SESSION_LIMIT, await countRunningLlmSessions()) <= 0
+      ) {
+        return [];
+      }
       const policy = parseHeartbeatPolicy(agent);
       const runningCount = await countRunningRunsForAgent(agentId);
       const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
@@ -13525,6 +13957,63 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
       return claimedRuns;
     });
+  }
+
+  let globalQueuePump: Promise<void> | null = null;
+
+  async function pumpQueuedLlmRunsGlobally() {
+    if (globalQueuePump) return globalQueuePump;
+    globalQueuePump = (async () => {
+      if ((await getSchedulingSuppression()).suppressed) return;
+      const cutoff = await getWorktreeExecutionCutoff();
+      if (remainingSessionSlots(GLOBAL_LLM_SESSION_LIMIT, await countRunningLlmSessions()) <= 0) return;
+
+      const queuedRows = await db
+        .select({
+          agentId: heartbeatRuns.agentId,
+          createdAt: sql<Date>`min(${heartbeatRuns.createdAt})`,
+        })
+        .from(heartbeatRuns)
+        .innerJoin(agents, eq(agents.id, heartbeatRuns.agentId))
+        .innerJoin(companies, eq(companies.id, heartbeatRuns.companyId))
+        .where(and(
+          eq(heartbeatRuns.status, "queued"),
+          inArray(agents.adapterType, ["codex_local", "claude_local"]),
+          eq(companies.status, "active"),
+          cutoff ? gte(heartbeatRuns.createdAt, cutoff) : undefined,
+        ))
+        .groupBy(heartbeatRuns.agentId)
+        .orderBy(sql`min(${heartbeatRuns.createdAt})`);
+      if (queuedRows.length === 0) return;
+
+      const reservationPolicy = resolvePrGovernanceReservationPolicy(runtimeEnv);
+      const queuedAgentIds = queuedRows.map((row) => row.agentId);
+      const demand = await inspectPrGovernanceDemand(reservationPolicy, cutoff);
+      const governanceAgentIds = demand.hasRunnableDemand
+        ? demand.runnableAgentIds.filter((agentId) => queuedAgentIds.includes(agentId))
+        : [];
+      const orderedAgentIds = [
+        ...governanceAgentIds,
+        ...queuedAgentIds.filter((agentId) => !governanceAgentIds.includes(agentId)),
+      ];
+
+      for (const queuedAgentId of orderedAgentIds) {
+        if (remainingSessionSlots(GLOBAL_LLM_SESSION_LIMIT, await countRunningLlmSessions()) <= 0) break;
+        await startNextQueuedRunForAgent(queuedAgentId);
+      }
+    })().finally(() => {
+      globalQueuePump = null;
+    });
+    return globalQueuePump;
+  }
+
+  async function refillCapacityAfterRun(agentId: string) {
+    const completedAgent = await getAgent(agentId).catch(() => null);
+    if (completedAgent?.adapterType === "codex_local" || completedAgent?.adapterType === "claude_local") {
+      await pumpQueuedLlmRunsGlobally();
+      return;
+    }
+    await startNextQueuedRunForAgent(agentId);
   }
 
   // Await every background heartbeat execution that is currently in flight. A
@@ -14162,7 +14651,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     let executionRunConfig = stripWorkspaceRuntimeFromExecutionRunConfig(mergedConfig);
     if (agent.adapterType === "codex_local" && agent.codexAccountMode === "first_available") {
       const selection = await withCodexAccountSelectionLock(agent.companyId, async () => {
-        const selected = await resolveFirstAvailableCodexAccount(db, agent.companyId);
+        const selected = await resolveFirstAvailableCodexAccount(db, agent.companyId, {
+          excludeRunId: run.id,
+        });
         if (!selected) {
           throw new ConfigurationIncompleteFailure(
             "configuration incomplete: automatic Codex account selection requires at least one authenticated account.",
@@ -14184,10 +14675,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           accountName: selected.accountName,
           quotaState: selected.quotaState,
         };
-        await db
+        const stamped = await db
           .update(heartbeatRuns)
           .set({ contextSnapshot: context, updatedAt: new Date() })
-          .where(eq(heartbeatRuns.id, run.id));
+          .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "running")))
+          .returning({ id: heartbeatRuns.id })
+          .then((rows) => rows[0] ?? null);
+        if (!stamped) {
+          throw new Error(`Heartbeat run ${run.id} left running state during Codex account selection`);
+        }
         return selected;
       });
       executionRunConfig = {
@@ -14202,7 +14698,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
     if (agent.adapterType === "claude_local" && agent.claudeAccountMode === "first_available") {
       const selection = await withClaudeAccountSelectionLock(agent.companyId, async () => {
-        const selected = await resolveFirstAvailableClaudeAccount(db, agent.companyId);
+        const selected = await resolveFirstAvailableClaudeAccount(db, agent.companyId, {
+          excludeRunId: run.id,
+        });
         if (!selected) {
           throw new ConfigurationIncompleteFailure(
             "configuration incomplete: automatic Claude account selection requires at least one authenticated account.",
@@ -14224,9 +14722,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           accountName: selected.accountName,
           quotaState: selected.quotaState,
         };
-        await db.update(heartbeatRuns)
+        const stamped = await db.update(heartbeatRuns)
           .set({ contextSnapshot: context, updatedAt: new Date() })
-          .where(eq(heartbeatRuns.id, run.id));
+          .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "running")))
+          .returning({ id: heartbeatRuns.id })
+          .then((rows) => rows[0] ?? null);
+        if (!stamped) {
+          throw new Error(`Heartbeat run ${run.id} left running state during Claude account selection`);
+        }
         return selected;
       });
       executionRunConfig = {
@@ -16445,7 +16948,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             }
           }
           activeRunExecutions.delete(run.id);
-          await startNextQueuedRunForAgent(run.agentId);
+          await refillCapacityAfterRun(run.agentId);
         }
   }
 
@@ -18576,6 +19079,67 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     eventPayload?: Record<string, unknown>;
   };
 
+  type CancelQueuedRunResult = {
+    run: typeof heartbeatRuns.$inferSelect | null;
+    cancelled: boolean;
+  };
+
+  // Queue rebalancing must never terminate an executor that won the
+  // queued->running claim race. Perform the status transition first as one
+  // conditional UPDATE and run cancellation side effects only when that CAS
+  // succeeds. Unlike cancelRunInternal, this path never signals a process.
+  async function cancelQueuedRunInternal(
+    runId: string,
+    reason = "Queued run cancelled by control plane",
+    options: CancelRunOptions = {},
+  ): Promise<CancelQueuedRunResult> {
+    const run = await getRun(runId);
+    if (!run) throw notFound("Heartbeat run not found");
+    if (run.status !== "queued") return { run, cancelled: false };
+
+    const agent = await getAgent(run.agentId);
+    const errorCode = options.errorCode ?? "cancelled";
+    const resultJson = agent
+      ? {
+          ...mergeRunStopMetadataForAgent(agent, "cancelled", {
+            resultJson: parseObject(run.resultJson),
+            errorCode,
+            errorMessage: reason,
+          }),
+          ...(options.resultJson ?? {}),
+        }
+      : options.resultJson;
+    const finishedAt = new Date();
+    const write = await setRunStatusFromLive(run.id, "cancelled", ["queued"], {
+      finishedAt,
+      error: reason,
+      errorCode,
+      ...(resultJson ? { resultJson } : {}),
+    });
+    if (!write.updated || !write.run) {
+      return { run: write.run, cancelled: false };
+    }
+
+    const cancelled = write.run;
+    await setWakeupStatus(cancelled.wakeupRequestId, "cancelled", {
+      finishedAt,
+      error: reason,
+    });
+    await appendRunEvent(cancelled, await nextRunEventSeq(cancelled.id), {
+      eventType: "lifecycle",
+      stream: "system",
+      level: "warn",
+      message: options.eventMessage ?? "queued run cancelled",
+      ...(options.eventPayload ? { payload: options.eventPayload } : {}),
+    });
+    await releaseIssueExecutionAndPromote(cancelled);
+    await finalizeAgentStatus(cancelled.agentId, "cancelled", undefined, {
+      wasFirstHeartbeat: timerClaimWasFirstHeartbeat(cancelled),
+    });
+    await startNextQueuedRunForAgent(cancelled.agentId);
+    return { run: cancelled, cancelled: true };
+  }
+
   async function cancelRunInternal(runId: string, reason = "Cancelled by control plane", options: CancelRunOptions = {}) {
     const run = await getRun(runId);
     if (!run) throw notFound("Heartbeat run not found");
@@ -18638,7 +19202,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     await finalizeAgentStatus(run.agentId, "cancelled", undefined, {
       wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
     });
-    await startNextQueuedRunForAgent(run.agentId);
+    await refillCapacityAfterRun(run.agentId);
     return cancelled;
   }
 
@@ -19148,6 +19712,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     },
 
     cancelRun: (runId: string, reason?: string, options?: CancelRunOptions) => cancelRunInternal(runId, reason, options),
+    cancelQueuedRun: (runId: string, reason?: string, options?: CancelRunOptions) =>
+      cancelQueuedRunInternal(runId, reason, options),
 
     /**
      * Pause-only. Emits errorCode "agent_paused" unconditionally; its sole caller is the
