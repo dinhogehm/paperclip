@@ -229,6 +229,7 @@ import {
   COMPANY_IMPORT_TRANSFERS_API_PATH,
   companyImportTransferDeclarationSchema,
 } from "@paperclipai/shared/company-import-transfer";
+import { updateAgentAssignmentsSchema } from "./agent-assignments.js";
 
 type JsonSchema = Record<string, unknown>;
 type OpenApiResponse = Record<string, unknown>;
@@ -1639,6 +1640,29 @@ registry.registerPath({
     body: jsonBody(createAgentSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/agent-assignments",
+  tags: ["agents"],
+  summary: "List agent subscription account assignments",
+});
+
+registerCurrentRoute({
+  method: "put",
+  path: "/api/companies/{companyId}/agent-assignments/{agentId}",
+  tags: ["agents"],
+  summary: "Update an agent subscription account assignment",
+  body: updateAgentAssignmentsSchema,
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    404: r.notFound,
+    409: r.conflict,
+    422: r.unprocessable,
+  },
 });
 
 registry.registerPath({
