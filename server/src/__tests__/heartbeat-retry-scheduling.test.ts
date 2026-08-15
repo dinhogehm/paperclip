@@ -1,12 +1,17 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { and, eq, inArray, sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
   agentRuntimeState,
   agentWakeupRequests,
   activityLog,
   budgetPolicies,
+  claudeAccounts,
+  codexAccounts,
   companies,
   companySkills,
   createDb,
@@ -32,6 +37,8 @@ import {
   MAX_TURN_CONTINUATION_WAKE_REASON,
   heartbeatService,
 } from "../services/heartbeat.ts";
+import { resolveCodexAccountHome } from "../services/codex-accounts.ts";
+import { resolveClaudeAccountConfigDir } from "../services/claude-accounts.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -293,6 +300,729 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
         { timeout: 5_000, interval: 50 },
       )
       .toEqual({ status: "idle", errorReason: null });
+  });
+
+  it.each([
+    ["first-available", "first_available"],
+    ["fixed", "fixed"],
+  ] as const)("defers %s work when the selected authenticated account is at session capacity", async (
+    _label,
+    accountMode,
+  ) => {
+    const companyId = randomUUID();
+    const targetAgentId = randomUUID();
+    const busyAgentId = randomUUID();
+    const codexAccountId = randomUUID();
+    const busyRunIds = [randomUUID(), randomUUID()];
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const paperclipHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-account-capacity-"));
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      rate_limit: {
+        primary_window: {
+          used_percent: 20,
+          limit_window_seconds: 18_000,
+          reset_at: null,
+        },
+      },
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })));
+
+    try {
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Managed account capacity",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
+      });
+      await db.insert(codexAccounts).values({
+        id: codexAccountId,
+        companyId,
+        name: "Only authenticated account",
+      });
+      const codexHome = resolveCodexAccountHome(companyId, codexAccountId);
+      await fs.mkdir(codexHome, { recursive: true });
+      await fs.writeFile(path.join(codexHome, "auth.json"), JSON.stringify({
+        tokens: { access_token: "test-access-token", account_id: "test-account" },
+      }));
+      await db.insert(agents).values([
+        {
+          id: targetAgentId,
+          companyId,
+          name: "Waiting worker",
+          role: "engineer",
+          status: "idle",
+          adapterType: "codex_local",
+          codexAccountMode: accountMode,
+          ...(accountMode === "fixed" ? { codexAccountId } : {}),
+          adapterConfig: {},
+          runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+          permissions: {},
+        },
+        {
+          id: busyAgentId,
+          companyId,
+          name: "Capacity holder",
+          role: "engineer",
+          status: "active",
+          adapterType: "codex_local",
+          adapterConfig: {},
+          runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 2 } },
+          permissions: {},
+        },
+      ]);
+      await db.insert(heartbeatRuns).values(busyRunIds.map((id) => ({
+        id,
+        companyId,
+        agentId: busyAgentId,
+        status: "running",
+        startedAt: new Date(),
+        contextSnapshot: {
+          paperclipEffectiveAdapterType: "codex_local",
+          paperclipCodexAccount: {
+            mode: accountMode,
+            accountId: codexAccountId,
+          },
+        },
+      })));
+
+      const run = await heartbeat.invoke(targetAgentId, "on_demand", {}, "manual");
+      expect(run).not.toBeNull();
+      const deferredRun = await waitForRunToFinish(heartbeat, run!.id);
+
+      expect(deferredRun).toMatchObject({
+        status: "cancelled",
+        errorCode: "subscription_account_capacity",
+      });
+      expect(deferredRun?.errorCode).not.toBe("configuration_incomplete");
+      expect(deferredRun?.resultJson).toMatchObject({
+        subscriptionAccountCapacity: {
+          providers: ["codex_local"],
+          deferralAttempt: 0,
+        },
+      });
+
+      await expect.poll(
+        () => db
+          .select()
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.retryOfRunId, run!.id))
+          .then((rows) => rows[0] ?? null),
+        { timeout: 5_000, interval: 50 },
+      ).toMatchObject({
+        status: "scheduled_retry",
+        scheduledRetryAttempt: 1,
+        scheduledRetryReason: "subscription_account_capacity",
+      });
+    } finally {
+      await db.update(heartbeatRuns)
+        .set({ status: "cancelled", finishedAt: new Date() })
+        .where(inArray(heartbeatRuns.id, busyRunIds));
+      vi.unstubAllGlobals();
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      await fs.rm(paperclipHome, { recursive: true, force: true });
+    }
+  });
+
+  it("re-evaluates both providers after a capacity deferral instead of retaining a forced pin", async () => {
+    const companyId = randomUUID();
+    const targetAgentId = randomUUID();
+    const busyAgentId = randomUUID();
+    const codexAccountId = randomUUID();
+    const busyRunIds = [randomUUID(), randomUUID()];
+    const quotaDeadline = "2030-04-22T21:00:00.000Z";
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const paperclipHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-capacity-failover-"));
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    const codexExecute = vi.fn(async () => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      summary: "Codex should not execute while its managed account is full",
+    }));
+    const claudeExecute = vi.fn(async () => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      summary: "Claude completed after provider re-evaluation",
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      rate_limit: {
+        primary_window: {
+          used_percent: 20,
+          limit_window_seconds: 18_000,
+          reset_at: null,
+        },
+      },
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })));
+    registerServerAdapter({
+      type: "codex_local",
+      execute: codexExecute,
+      testEnvironment: async () => ({
+        adapterType: "codex_local",
+        status: "pass",
+        checks: [],
+        testedAt: new Date().toISOString(),
+      }),
+    });
+    registerServerAdapter({
+      type: "claude_local",
+      execute: claudeExecute,
+      testEnvironment: async () => ({
+        adapterType: "claude_local",
+        status: "pass",
+        checks: [],
+        testedAt: new Date().toISOString(),
+      }),
+    });
+
+    try {
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Capacity failover",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
+      });
+      await db.insert(codexAccounts).values({
+        id: codexAccountId,
+        companyId,
+        name: "Busy Codex account",
+      });
+      const codexHome = resolveCodexAccountHome(companyId, codexAccountId);
+      await fs.mkdir(codexHome, { recursive: true });
+      await fs.writeFile(path.join(codexHome, "auth.json"), JSON.stringify({
+        tokens: { access_token: "test-access-token", account_id: "test-account" },
+      }));
+      await db.insert(agents).values([
+        {
+          id: targetAgentId,
+          companyId,
+          name: "Failover worker",
+          role: "engineer",
+          status: "idle",
+          adapterType: "codex_local",
+          codexAccountMode: "first_available",
+          claudeAccountMode: "host",
+          adapterConfig: {},
+          runtimeConfig: {
+            heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 },
+            subscriptionFailover: {
+              enabled: true,
+              order: ["codex_local", "claude_local"],
+            },
+          },
+          permissions: {},
+        },
+        {
+          id: busyAgentId,
+          companyId,
+          name: "Capacity holder",
+          role: "engineer",
+          status: "active",
+          adapterType: "codex_local",
+          adapterConfig: {},
+          runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 2 } },
+          permissions: {},
+        },
+      ]);
+      await db.insert(heartbeatRuns).values(busyRunIds.map((id) => ({
+        id,
+        companyId,
+        agentId: busyAgentId,
+        status: "running",
+        startedAt: new Date(),
+        contextSnapshot: {
+          paperclipEffectiveAdapterType: "codex_local",
+          paperclipCodexAccount: {
+            mode: "first_available",
+            accountId: codexAccountId,
+          },
+        },
+      })));
+
+      const run = await heartbeat.invoke(targetAgentId, "on_demand", {
+        paperclipEffectiveAdapterType: "codex_local",
+        paperclipSubscriptionFailover: {
+          effectiveAdapterType: "codex_local",
+          quotaNotBeforeByProvider: { codex_local: quotaDeadline },
+        },
+        forceFreshSession: true,
+      }, "manual");
+      expect(run).not.toBeNull();
+      expect(await waitForRunToFinish(heartbeat, run!.id)).toMatchObject({
+        status: "cancelled",
+        errorCode: "subscription_account_capacity",
+      });
+
+      await expect.poll(
+        () => db
+          .select()
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.retryOfRunId, run!.id))
+          .then((rows) => rows[0] ?? null),
+        { timeout: 5_000, interval: 50 },
+      ).not.toBeNull();
+      const retryRun = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.retryOfRunId, run!.id))
+        .then((rows) => rows[0]!);
+      const retryContext = retryRun.contextSnapshot as Record<string, unknown>;
+      expect(retryContext.paperclipEffectiveAdapterType).toBeUndefined();
+      expect(retryContext.paperclipCodexAccount).toBeUndefined();
+      expect(retryContext.forceFreshSession).toBe(true);
+      expect(retryContext.paperclipSubscriptionFailover).toMatchObject({
+        quotaNotBeforeByProvider: { codex_local: quotaDeadline },
+      });
+      expect((retryContext.paperclipSubscriptionFailover as Record<string, unknown>).effectiveAdapterType)
+        .toBeUndefined();
+
+      expect(await heartbeat.promoteDueScheduledRetries(retryRun.scheduledRetryAt!))
+        .toEqual({ promoted: 1, runIds: [retryRun.id] });
+      await heartbeat.resumeQueuedRuns();
+      expect(await waitForRunToFinish(heartbeat, retryRun.id)).toMatchObject({ status: "succeeded" });
+      expect(codexExecute).not.toHaveBeenCalled();
+      expect(claudeExecute).toHaveBeenCalledTimes(1);
+    } finally {
+      await db.update(heartbeatRuns)
+        .set({ status: "cancelled", finishedAt: new Date() })
+        .where(inArray(heartbeatRuns.id, busyRunIds));
+      unregisterServerAdapter("codex_local");
+      unregisterServerAdapter("claude_local");
+      vi.unstubAllGlobals();
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      await fs.rm(paperclipHome, { recursive: true, force: true });
+    }
+  });
+
+  it("fails a fixed unauthenticated account without substituting another company account", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const fixedAccountId = randomUUID();
+    const otherAccountId = randomUUID();
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const paperclipHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-fixed-account-auth-"));
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    const quotaFetch = vi.fn(async () => new Response(JSON.stringify({
+      rate_limit: {
+        primary_window: {
+          used_percent: 20,
+          limit_window_seconds: 18_000,
+          reset_at: null,
+        },
+      },
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", quotaFetch);
+
+    try {
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Fixed account authentication",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
+      });
+      await db.insert(codexAccounts).values([
+        {
+          id: fixedAccountId,
+          companyId,
+          name: "Fixed but signed out",
+        },
+        {
+          id: otherAccountId,
+          companyId,
+          name: "Authenticated but not selected",
+        },
+      ]);
+      const otherCodexHome = resolveCodexAccountHome(companyId, otherAccountId);
+      await fs.mkdir(otherCodexHome, { recursive: true });
+      await fs.writeFile(path.join(otherCodexHome, "auth.json"), JSON.stringify({
+        tokens: { access_token: "other-access-token", account_id: "other-account" },
+      }));
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Fixed worker",
+        role: "engineer",
+        status: "idle",
+        adapterType: "codex_local",
+        codexAccountMode: "fixed",
+        codexAccountId: fixedAccountId,
+        adapterConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+        permissions: {},
+      });
+
+      const run = await heartbeat.invoke(agentId, "on_demand", {}, "manual");
+      expect(run).not.toBeNull();
+      const failedRun = await waitForRunToFinish(heartbeat, run!.id);
+
+      expect(failedRun).toMatchObject({
+        status: "failed",
+        errorCode: "configuration_incomplete",
+        resultJson: {
+          configurationIncomplete: {
+            reason: "codex_account_unavailable",
+            companyId,
+            agentId,
+            adapterType: "codex_local",
+          },
+        },
+      });
+      expect(failedRun?.errorCode).not.toBe("subscription_account_capacity");
+      // The authenticated account was intentionally not the configured fixed
+      // account, so it must not even be quota-probed as a fallback candidate.
+      expect(quotaFetch).not.toHaveBeenCalled();
+      await expect(db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.retryOfRunId, run!.id)))
+        .resolves.toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      await fs.rm(paperclipHome, { recursive: true, force: true });
+    }
+  });
+
+  it("switches a quota retry to the secondary provider without waiting for the primary reset", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const claudeAccountId = randomUUID();
+    const primaryResetAt = "2030-04-22T21:00:00.000Z";
+    const claudeConfigs: Record<string, unknown>[] = [];
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousClaudeExecutable = process.env.PAPERCLIP_CLAUDE_EXECUTABLE;
+    const previousAmbientOpenAiKey = process.env.OPENAI_API_KEY;
+    const previousAmbientCodexHome = process.env.CODEX_HOME;
+    const paperclipHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-failover-"));
+    const fakeClaudeExecutable = path.join(paperclipHome, "fake-claude");
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    process.env.PAPERCLIP_CLAUDE_EXECUTABLE = fakeClaudeExecutable;
+    process.env.OPENAI_API_KEY = "ambient-openai-must-not-cross";
+    process.env.CODEX_HOME = "/ambient/codex-must-not-cross";
+    await fs.writeFile(
+      fakeClaudeExecutable,
+      '#!/bin/sh\nprintf \'%s\\n\' \'{"loggedIn":true,"authMethod":"claude.ai","subscriptionType":"max"}\'\n',
+    );
+    await fs.chmod(fakeClaudeExecutable, 0o755);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      five_hour: { utilization: 20, resets_at: null },
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })));
+
+    registerServerAdapter({
+      type: "codex_local",
+      execute: async () => ({
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: "Codex weekly quota exhausted",
+        errorCode: "provider_quota",
+        errorFamily: "provider_quota",
+        retryNotBefore: primaryResetAt,
+        resultJson: {
+          errorFamily: "provider_quota",
+          retryNotBefore: primaryResetAt,
+          providerQuotaRetryNotBefore: primaryResetAt,
+        },
+      }),
+      testEnvironment: async () => ({
+        adapterType: "codex_local",
+        status: "pass",
+        checks: [],
+        testedAt: new Date().toISOString(),
+      }),
+    });
+    registerServerAdapter({
+      type: "claude_local",
+      execute: async ({ config }) => {
+        claudeConfigs.push(config);
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          summary: "Claude fallback completed",
+          provider: "anthropic",
+          model: "claude-test",
+        };
+      },
+      testEnvironment: async () => ({
+        adapterType: "claude_local",
+        status: "pass",
+        checks: [],
+        testedAt: new Date().toISOString(),
+      }),
+    });
+
+    try {
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
+      });
+      await db.insert(claudeAccounts).values({
+        id: claudeAccountId,
+        companyId,
+        name: "Fallback Claude",
+      });
+      const claudeConfigDir = resolveClaudeAccountConfigDir(companyId, claudeAccountId);
+      await fs.mkdir(claudeConfigDir, { recursive: true });
+      await fs.writeFile(path.join(claudeConfigDir, ".credentials.json"), JSON.stringify({
+        claudeAiOauth: { accessToken: "test-claude-token" },
+      }));
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Dual Provider",
+        role: "engineer",
+        status: "idle",
+        adapterType: "codex_local",
+        claudeAccountMode: "fixed",
+        claudeAccountId,
+        adapterConfig: {
+          command: "custom-codex",
+          model: "gpt-primary",
+          extraArgs: ["--codex-only"],
+          env: {
+            OPENAI_API_KEY: "test-only",
+            ANTHROPIC_API_KEY: "must-not-win",
+          },
+        },
+        runtimeConfig: {
+          heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 },
+          subscriptionFailover: {
+            enabled: true,
+            order: ["codex_local", "claude_local"],
+          },
+        },
+        permissions: {},
+      });
+
+      const run = await heartbeat.invoke(agentId, "on_demand", {}, "manual");
+      expect(run).not.toBeNull();
+      const failedRun = await waitForRunToFinish(heartbeat, run!.id);
+      expect(failedRun?.errorCode).toBe("provider_quota");
+
+      await expect.poll(
+        () => db
+          .select()
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.retryOfRunId, run!.id))
+          .then((rows) => rows[0] ?? null),
+        { timeout: 5_000, interval: 50 },
+      ).not.toBeNull();
+
+      const retryRun = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.retryOfRunId, run!.id))
+        .then((rows) => rows[0]!);
+      const retryContext = retryRun.contextSnapshot as Record<string, unknown>;
+      expect(retryRun.scheduledRetryAt!.getTime()).toBeLessThan(new Date(primaryResetAt).getTime());
+      expect(retryContext.paperclipEffectiveAdapterType).toBe("claude_local");
+      expect(retryContext.forceFreshSession).toBe(true);
+      expect(retryContext.paperclipSubscriptionFailover).toMatchObject({
+        effectiveAdapterType: "claude_local",
+        quotaNotBeforeByProvider: { codex_local: primaryResetAt },
+      });
+
+      const promotion = await heartbeat.promoteDueScheduledRetries(retryRun.scheduledRetryAt!);
+      expect(promotion).toEqual({ promoted: 1, runIds: [retryRun.id] });
+      await heartbeat.resumeQueuedRuns();
+      const completedRetry = await waitForRunToFinish(heartbeat, retryRun.id);
+      expect(completedRetry?.status).toBe("succeeded");
+      expect(claudeConfigs).toHaveLength(1);
+      expect(claudeConfigs[0]).not.toHaveProperty("command");
+      expect(claudeConfigs[0]).not.toHaveProperty("extraArgs");
+      expect(claudeConfigs[0]).not.toHaveProperty("model", "gpt-primary");
+      expect(claudeConfigs[0]?.env).toMatchObject({
+        ANTHROPIC_API_KEY: "",
+        ANTHROPIC_AUTH_TOKEN: "",
+        CLAUDE_CODE_OAUTH_TOKEN: "",
+      });
+      expect((claudeConfigs[0]?.env as Record<string, unknown>).CLAUDE_CONFIG_DIR).toEqual(expect.any(String));
+      expect((claudeConfigs[0]?.env as Record<string, unknown>).OPENAI_API_KEY).toBe("");
+      expect((claudeConfigs[0]?.env as Record<string, unknown>).CODEX_HOME).toBe("");
+    } finally {
+      unregisterServerAdapter("codex_local");
+      unregisterServerAdapter("claude_local");
+      vi.unstubAllGlobals();
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousClaudeExecutable === undefined) delete process.env.PAPERCLIP_CLAUDE_EXECUTABLE;
+      else process.env.PAPERCLIP_CLAUDE_EXECUTABLE = previousClaudeExecutable;
+      if (previousAmbientOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previousAmbientOpenAiKey;
+      if (previousAmbientCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousAmbientCodexHome;
+      await fs.rm(paperclipHome, { recursive: true, force: true });
+    }
+  });
+
+  it("executes Claude to Codex failover with managed Codex auth pinned", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const codexAccountId = randomUUID();
+    const primaryResetAt = "2030-04-22T21:00:00.000Z";
+    const codexConfigs: Record<string, unknown>[] = [];
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousAmbientAnthropicKey = process.env.ANTHROPIC_API_KEY;
+    const previousAmbientClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    const paperclipHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-dual-provider-"));
+    process.env.PAPERCLIP_HOME = paperclipHome;
+    process.env.ANTHROPIC_API_KEY = "ambient-anthropic-must-not-cross";
+    process.env.CLAUDE_CONFIG_DIR = "/ambient/claude-must-not-cross";
+
+    registerServerAdapter({
+      type: "claude_local",
+      execute: async () => ({
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: "Claude weekly quota exhausted",
+        errorCode: "provider_quota",
+        errorFamily: "provider_quota",
+        retryNotBefore: primaryResetAt,
+        resultJson: { errorFamily: "provider_quota", retryNotBefore: primaryResetAt },
+      }),
+      testEnvironment: async () => ({
+        adapterType: "claude_local",
+        status: "pass",
+        checks: [],
+        testedAt: new Date().toISOString(),
+      }),
+    });
+    registerServerAdapter({
+      type: "codex_local",
+      execute: async ({ config }) => {
+        codexConfigs.push(config);
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          summary: "Codex fallback completed",
+          provider: "openai",
+          model: "codex-test",
+        };
+      },
+      testEnvironment: async () => ({
+        adapterType: "codex_local",
+        status: "pass",
+        checks: [],
+        testedAt: new Date().toISOString(),
+      }),
+    });
+
+    try {
+      await db.insert(companies).values({
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+        defaultResponsibleUserId: "responsible-user",
+      });
+      await db.insert(codexAccounts).values({
+        id: codexAccountId,
+        companyId,
+        name: "Fallback Codex",
+      });
+      const codexHome = resolveCodexAccountHome(companyId, codexAccountId);
+      await fs.mkdir(codexHome, { recursive: true });
+      await fs.writeFile(path.join(codexHome, "auth.json"), JSON.stringify({
+        tokens: { access_token: "test-access-token", account_id: "test-account" },
+      }));
+      await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Reverse Dual Provider",
+        role: "engineer",
+        status: "idle",
+        adapterType: "claude_local",
+        codexAccountMode: "fixed",
+        codexAccountId,
+        adapterConfig: {
+          command: "custom-claude",
+          model: "claude-primary",
+          extraArgs: ["--claude-only"],
+          env: {
+            ANTHROPIC_API_KEY: "test-only",
+            OPENAI_API_KEY: "must-not-win",
+          },
+        },
+        runtimeConfig: {
+          heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 },
+          subscriptionFailover: {
+            enabled: true,
+            order: ["claude_local", "codex_local"],
+          },
+        },
+        permissions: {},
+      });
+
+      const run = await heartbeat.invoke(agentId, "on_demand", {}, "manual");
+      expect(run).not.toBeNull();
+      expect((await waitForRunToFinish(heartbeat, run!.id))?.errorCode).toBe("provider_quota");
+
+      await expect.poll(
+        () => db
+          .select()
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.retryOfRunId, run!.id))
+          .then((rows) => rows[0] ?? null),
+        { timeout: 5_000, interval: 50 },
+      ).not.toBeNull();
+      const retryRun = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.retryOfRunId, run!.id))
+        .then((rows) => rows[0]!);
+      expect((retryRun.contextSnapshot as Record<string, unknown>).paperclipEffectiveAdapterType)
+        .toBe("codex_local");
+
+      expect(await heartbeat.promoteDueScheduledRetries(retryRun.scheduledRetryAt!))
+        .toEqual({ promoted: 1, runIds: [retryRun.id] });
+      await heartbeat.resumeQueuedRuns();
+      expect((await waitForRunToFinish(heartbeat, retryRun.id))?.status).toBe("succeeded");
+      expect(codexConfigs).toHaveLength(1);
+      expect(codexConfigs[0]).not.toHaveProperty("command");
+      expect(codexConfigs[0]).not.toHaveProperty("extraArgs");
+      expect(codexConfigs[0]).not.toHaveProperty("model", "claude-primary");
+      expect(codexConfigs[0]?.env).toMatchObject({
+        OPENAI_API_KEY: "",
+        OPENAI_BASE_URL: "",
+      });
+      expect((codexConfigs[0]?.env as Record<string, unknown>).CODEX_HOME).toEqual(expect.any(String));
+      expect((codexConfigs[0]?.env as Record<string, unknown>).ANTHROPIC_API_KEY).toBe("");
+      expect((codexConfigs[0]?.env as Record<string, unknown>).CLAUDE_CONFIG_DIR).toBe("");
+    } finally {
+      unregisterServerAdapter("claude_local");
+      unregisterServerAdapter("codex_local");
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousAmbientAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAmbientAnthropicKey;
+      if (previousAmbientClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousAmbientClaudeConfigDir;
+      await fs.rm(paperclipHome, { recursive: true, force: true });
+    }
   });
 
   async function seedMaxTurnFixture(input?: {
@@ -2086,6 +2816,39 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
       scheduledRetryAttempt: BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS.length,
       maxAttempts: BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS.length,
     });
+  });
+
+  it("keeps provider-quota recovery scheduled beyond the generic retry cap", async () => {
+    const now = new Date("2026-04-20T18:00:00.000Z");
+    const resetAt = new Date("2026-04-21T06:00:00.000Z");
+    const fixture = {
+      companyId: randomUUID(),
+      agentId: randomUUID(),
+      runId: randomUUID(),
+    };
+    await seedRetryFixture({
+      ...fixture,
+      now,
+      errorCode: "provider_quota",
+      errorFamily: "provider_quota",
+      retryNotBefore: resetAt.toISOString(),
+      scheduledRetryAttempt: BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS.length,
+      resultJson: {
+        errorFamily: "provider_quota",
+        retryNotBefore: resetAt.toISOString(),
+      },
+    });
+
+    const scheduled = await heartbeat.scheduleBoundedRetry(fixture.runId, {
+      now,
+      random: () => 0.5,
+    });
+
+    expect(scheduled.outcome).toBe("scheduled");
+    if (scheduled.outcome !== "scheduled") return;
+    expect(scheduled.attempt).toBe(BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS.length + 1);
+    expect(scheduled.maxAttempts).toBe(scheduled.attempt);
+    expect(scheduled.dueAt).toEqual(resetAt);
   });
 
   it("advances codex transient fallback stages across bounded retry attempts", async () => {

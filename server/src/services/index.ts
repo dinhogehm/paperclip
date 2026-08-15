@@ -3,14 +3,40 @@ export {
   codexAccountService,
   resolveCodexAccountHome,
   resolveFirstAvailableCodexAccount,
+  resolveFirstAvailableCodexAccountWithDiagnostics,
   selectFirstAvailableCodexAccount,
+  selectFirstAvailableCodexAccountWithDiagnostics,
+  type AutoSelectableCodexAccount,
+  type FirstAvailableCodexAccountDiagnosticReason,
+  type FirstAvailableCodexAccountDiagnostics,
+  type ResolveFirstAvailableCodexAccountOptions,
+  type SelectFirstAvailableCodexAccountInput,
 } from "./codex-accounts.js";
 export {
   claudeAccountService,
   resolveClaudeAccountConfigDir,
   resolveFirstAvailableClaudeAccount,
+  resolveFirstAvailableClaudeAccountWithDiagnostics,
   selectFirstAvailableClaudeAccount,
+  selectFirstAvailableClaudeAccountWithDiagnostics,
+  type FirstAvailableClaudeAccountDiagnosticReason,
+  type FirstAvailableClaudeAccountDiagnostics,
+  type ResolveFirstAvailableClaudeAccountOptions,
+  type SelectFirstAvailableClaudeAccountInput,
+  type SelectableClaudeAccount,
 } from "./claude-accounts.js";
+export {
+  agentAssignmentsService,
+  assignmentActivityDetails,
+  runtimeConfigForAgentAssignments,
+  type AgentAssignmentSnapshot,
+  type AgentAssignmentsActor,
+  type SubscriptionAccountAssignment,
+  type SubscriptionAccountMode,
+  type SubscriptionProvider,
+  type UpdateAgentAssignmentsInput,
+  type UpdateAgentAssignmentsResult,
+} from "./agent-assignments.js";
 export { companyArtifactsService } from "./company-artifacts.js";
 export { companySearchService } from "./company-search.js";
 export { companySearchExtractService } from "./company-search-extract.js";

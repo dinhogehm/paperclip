@@ -290,13 +290,27 @@ import { extractSkillMentionIds, isUuidLike } from "@paperclipai/shared";
 import { evaluateCodexCredentialReadiness } from "@paperclipai/adapter-codex-local/server";
 import { environmentService } from "./environments.js";
 import {
-  resolveFirstAvailableCodexAccount,
+  resolveCodexManagedAccountRunEnv,
+  resolveFirstAvailableCodexAccountWithDiagnostics,
   withCodexAccountSelectionLock,
 } from "./codex-accounts.js";
 import {
-  resolveFirstAvailableClaudeAccount,
+  resolveClaudeManagedAccountRunEnv,
+  resolveFirstAvailableClaudeAccountWithDiagnostics,
   withClaudeAccountSelectionLock,
 } from "./claude-accounts.js";
+import {
+  isSubscriptionAdapterType,
+  readSubscriptionFailoverConfig,
+  resetSubscriptionProviderSelectionForCapacityRetry,
+  resolveCrossProviderProcessEnvOverrides,
+  sanitizeResolvedSubscriptionAdapterConfig,
+  resolveSubscriptionAdapterConfig,
+  resolveEffectiveSubscriptionAdapter,
+  resolveSubscriptionFailoverRetryTiming,
+  withSubscriptionFailoverRetryContext,
+  type SubscriptionAdapterType,
+} from "./subscription-failover.js";
 import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.js";
 import { environmentRuntimeService } from "./environment-runtime.js";
 import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
@@ -449,6 +463,11 @@ export const WORKSPACE_BUSY_RETRY_JITTER_MS = 60 * 1000;
 // workspace frees, because dispatching alongside a live holder is exactly the
 // concurrent-mutation failure this gate exists to prevent.
 export const WORKSPACE_BUSY_HOLDER_STALE_AFTER_MS = RECOVERY_ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS;
+const SUBSCRIPTION_ACCOUNT_CAPACITY_RETRY_REASON = "subscription_account_capacity";
+const SUBSCRIPTION_ACCOUNT_CAPACITY_RETRY_WAKE_REASON = "subscription_account_capacity_retry";
+const SUBSCRIPTION_ACCOUNT_CAPACITY_ERROR_CODE = "subscription_account_capacity";
+const SUBSCRIPTION_ACCOUNT_CAPACITY_RETRY_BASE_DELAY_MS = 15 * 1000;
+const SUBSCRIPTION_ACCOUNT_CAPACITY_RETRY_JITTER_MS = 15 * 1000;
 // Issue-level executionWorkspaceSettings.mode values that unambiguously opt an
 // issue's runs out of the shared project workspace, and therefore out of
 // shared-workspace serialization ("isolated" is the legacy alias
@@ -530,13 +549,38 @@ export class WorkspaceBusyDeferral extends Error {
   }
 }
 
+class SubscriptionAccountCapacityDeferral extends Error {
+  code = SUBSCRIPTION_ACCOUNT_CAPACITY_ERROR_CODE;
+  providers: SubscriptionAdapterType[];
+  deferralAttempt: number;
+
+  constructor(providers: SubscriptionAdapterType[], deferralAttempt: number) {
+    super("All authenticated subscription accounts are currently at their managed session limit");
+    this.name = "SubscriptionAccountCapacityDeferral";
+    this.providers = [...new Set(providers)];
+    this.deferralAttempt = deferralAttempt;
+  }
+}
+
 function isWorkspaceBusyDeferral(error: unknown): error is WorkspaceBusyDeferral {
   return error instanceof WorkspaceBusyDeferral;
+}
+
+function isSubscriptionAccountCapacityDeferral(
+  error: unknown,
+): error is SubscriptionAccountCapacityDeferral {
+  return error instanceof SubscriptionAccountCapacityDeferral;
 }
 
 export function computeWorkspaceBusyRetryDelayMs(random: () => number = Math.random) {
   const jitter = Math.min(Math.max(random(), 0), 1);
   return WORKSPACE_BUSY_RETRY_BASE_DELAY_MS + Math.floor(jitter * WORKSPACE_BUSY_RETRY_JITTER_MS);
+}
+
+function computeSubscriptionAccountCapacityRetryDelayMs(random: () => number = Math.random) {
+  const jitter = Math.min(Math.max(random(), 0), 1);
+  return SUBSCRIPTION_ACCOUNT_CAPACITY_RETRY_BASE_DELAY_MS
+    + Math.floor(jitter * SUBSCRIPTION_ACCOUNT_CAPACITY_RETRY_JITTER_MS);
 }
 
 // True for the retry of a workspace-busy deferral whose original run did NOT
@@ -3510,6 +3554,9 @@ export function resolveModelProfileApplication(input: {
   issueModelProfile: ModelProfileKey | null | undefined;
   contextSnapshot: Record<string, unknown> | null | undefined;
   profileResolutionFallbackReason?: string | null;
+  transformRuntimeAdapterConfig?: (
+    adapterConfig: Record<string, unknown>,
+  ) => Record<string, unknown>;
 }): ModelProfileApplication {
   const issueModelProfile = input.issueModelProfile ?? null;
   const contextModelProfile = readContextModelProfile(input.contextSnapshot);
@@ -3555,6 +3602,10 @@ export function resolveModelProfileApplication(input: {
     };
   }
 
+  const runtimeAdapterConfig = input.transformRuntimeAdapterConfig
+    ? input.transformRuntimeAdapterConfig(runtimeProfile.adapterConfig)
+    : runtimeProfile.adapterConfig;
+
   return {
     requested,
     requestedBy,
@@ -3563,7 +3614,7 @@ export function resolveModelProfileApplication(input: {
     fallbackReason: null,
     adapterConfig: {
       ...parseObject(adapterProfile.adapterConfig),
-      ...runtimeProfile.adapterConfig,
+      ...runtimeAdapterConfig,
     },
   };
 }
@@ -10285,15 +10336,30 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return { mode: "pid_mismatch" as const, skipDrain: false as const, activeRunIds: [] as string[] };
     }
 
-    const activeRuns = await db
+    const activeRunRows = await db
       .select({
         run: heartbeatRuns,
-        adapterType: agents.adapterType,
+        adapterType: sql<string>`coalesce(
+          nullif(${heartbeatRuns.contextSnapshot} ->> 'paperclipEffectiveAdapterType', ''),
+          ${agents.adapterType}
+        )`.as("adapterType"),
+        agentAdapterType: agents.adapterType,
         adapterConfig: agents.adapterConfig,
+        agentRuntimeConfig: agents.runtimeConfig,
       })
       .from(heartbeatRuns)
       .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
       .where(eq(heartbeatRuns.status, "running"));
+    const activeRuns = activeRunRows.map((row) => ({
+      run: row.run,
+      adapterType: row.adapterType,
+      adapterConfig: resolveSubscriptionAdapterConfig({
+        adapterConfig: parseObject(row.adapterConfig),
+        agentAdapterType: row.agentAdapterType,
+        effectiveAdapterType: row.adapterType,
+        failover: readSubscriptionFailoverConfig(row.agentRuntimeConfig),
+      }),
+    }));
     const snapshotRuns = activeRuns.map(toHotRestartIntentRun);
     const intentWithVersion = {
       ...intent,
@@ -10414,7 +10480,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       ? await db
         .select({
           run: heartbeatRuns,
-          adapterType: agents.adapterType,
+          adapterType: sql<string>`coalesce(
+            nullif(${heartbeatRuns.contextSnapshot} ->> 'paperclipEffectiveAdapterType', ''),
+            ${agents.adapterType}
+          )`.as("adapterType"),
         })
         .from(heartbeatRuns)
         .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
@@ -11114,13 +11183,26 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       wakeReason?: string;
       maxAttempts?: number;
       delayMs?: number;
+      resetSubscriptionProviderSelection?: boolean;
     },
   ) {
     const now = opts?.now ?? new Date();
     const retryReason = opts?.retryReason ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON;
     const wakeReason = opts?.wakeReason ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_WAKE_REASON;
-    const maxAttempts = Math.max(0, Math.floor(opts?.maxAttempts ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS));
+    const transientRecovery =
+      retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON
+        ? readTransientRecoveryContractFromRun(run)
+        : null;
     const nextAttempt = (run.scheduledRetryAttempt ?? 0) + 1;
+    const configuredMaxAttempts = Math.max(
+      0,
+      Math.floor(opts?.maxAttempts ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS),
+    );
+    const continuouslyRetryProviderQuota =
+      opts?.maxAttempts == null && transientRecovery?.errorFamily === "provider_quota";
+    const maxAttempts = continuouslyRetryProviderQuota
+      ? Math.max(configuredMaxAttempts, nextAttempt)
+      : configuredMaxAttempts;
     const computedBaseSchedule = opts?.delayMs != null
       ? nextAttempt <= maxAttempts
         ? {
@@ -11133,18 +11215,46 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         : null
       : nextAttempt <= maxAttempts
         ? computeBoundedTransientHeartbeatRetrySchedule(nextAttempt, now, opts?.random)
+          ?? (continuouslyRetryProviderQuota
+            ? (() => {
+                const capped = computeBoundedTransientHeartbeatRetrySchedule(
+                  BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS.length,
+                  now,
+                  opts?.random,
+                );
+                return capped ? { ...capped, attempt: nextAttempt, maxAttempts } : null;
+              })()
+            : null)
         : null;
     const baseSchedule = computedBaseSchedule ? { ...computedBaseSchedule, maxAttempts } : null;
-    const transientRecovery =
-      retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON
-        ? readTransientRecoveryContractFromRun(run)
-        : null;
+    const contextSnapshot = parseObject(run.contextSnapshot);
+    const stampedEffectiveAdapter = isSubscriptionAdapterType(contextSnapshot.paperclipEffectiveAdapterType)
+      ? contextSnapshot.paperclipEffectiveAdapterType
+      : null;
+    const currentEffectiveAdapter = stampedEffectiveAdapter
+      ?? resolveEffectiveSubscriptionAdapter({
+        agentAdapterType: agent.adapterType,
+        runtimeConfig: agent.runtimeConfig,
+        contextSnapshot,
+      })
+      ?? agent.adapterType;
     const codexTransientFallbackMode =
-      agent.adapterType === "codex_local" && transientRecovery?.errorFamily === "transient_upstream"
+      currentEffectiveAdapter === "codex_local"
+        && transientRecovery?.errorFamily === "transient_upstream"
         ? resolveCodexTransientFallbackMode(nextAttempt)
         : null;
     const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
-    const contextSnapshot = parseObject(run.contextSnapshot);
+    const failoverRetryTiming = transientRecovery?.errorFamily === "provider_quota"
+      ? resolveSubscriptionFailoverRetryTiming({
+          runtimeConfig: agent.runtimeConfig,
+          currentAdapterType: currentEffectiveAdapter,
+          retryNotBefore: transientRetryNotBefore,
+          contextSnapshot,
+        })
+      : null;
+    const effectiveTransientRetryNotBefore = failoverRetryTiming?.hasFailoverPolicy
+      ? failoverRetryTiming.effectiveRetryNotBefore
+      : transientRetryNotBefore;
     const issueId = readNonEmptyString(contextSnapshot.issueId);
     if (!baseSchedule) {
       await appendRunEvent(run, await nextRunEventSeq(run.id), {
@@ -11205,11 +11315,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     const schedule =
-      transientRetryNotBefore && transientRetryNotBefore.getTime() > baseSchedule.dueAt.getTime()
+      effectiveTransientRetryNotBefore
+        && effectiveTransientRetryNotBefore.getTime() > baseSchedule.dueAt.getTime()
         ? {
             ...baseSchedule,
-            dueAt: transientRetryNotBefore,
-            delayMs: Math.max(0, transientRetryNotBefore.getTime() - now.getTime()),
+            dueAt: effectiveTransientRetryNotBefore,
+            delayMs: Math.max(0, effectiveTransientRetryNotBefore.getTime() - now.getTime()),
           }
         : baseSchedule;
 
@@ -11263,7 +11374,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const shouldQuarantineWorkspaceForRetry =
       workspaceValidationRetryPayload !== null &&
       Object.keys(workspaceValidationRetryPayload).length > 0;
-    const retryContextSnapshot: Record<string, unknown> = withRecoveryModelProfileHint({
+    const failoverRetryAdapter = failoverRetryTiming?.failoverRetryAdapter ?? null;
+    let retryContextBase: Record<string, unknown> = {
       ...contextSnapshot,
       retryOfRunId: run.id,
       wakeReason,
@@ -11287,7 +11399,27 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ? { providerQuotaRetryNotBefore: transientRetryNotBefore.toISOString() }
         : {}),
       ...(codexTransientFallbackMode ? { codexTransientFallbackMode } : {}),
-    }, "normal_model");
+    };
+    if (opts?.resetSubscriptionProviderSelection) {
+      retryContextBase = resetSubscriptionProviderSelectionForCapacityRetry(
+        retryContextBase,
+        readSubscriptionFailoverConfig(agent.runtimeConfig) !== null,
+      );
+    }
+    if (failoverRetryAdapter) {
+      retryContextBase = withSubscriptionFailoverRetryContext(
+        retryContextBase,
+        failoverRetryAdapter,
+        failoverRetryTiming?.quotaNotBeforeByProvider,
+      );
+    } else if (failoverRetryTiming?.hasFailoverPolicy) {
+      retryContextBase.paperclipSubscriptionFailover = {
+        ...parseObject(retryContextBase.paperclipSubscriptionFailover),
+        effectiveAdapterType: currentEffectiveAdapter,
+        quotaNotBeforeByProvider: failoverRetryTiming.quotaNotBeforeByProvider,
+      };
+    }
+    const retryContextSnapshot: Record<string, unknown> = withRecoveryModelProfileHint(retryContextBase, "normal_model");
     const responsibleUserId = await resolveResponsibleUserIdForRunContext(run, retryContextSnapshot);
     const continuationRetryIdempotencyKey = retryReason === MAX_TURN_CONTINUATION_RETRY_REASON
       ? `max-turn-continuation:${run.companyId}:${issueId ?? "no-issue"}:${run.id}:${schedule.attempt}`
@@ -11935,6 +12067,82 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }).catch(() => undefined);
   }
 
+  async function finalizeSubscriptionAccountCapacityDeferral(
+    run: typeof heartbeatRuns.$inferSelect,
+    deferral: SubscriptionAccountCapacityDeferral,
+  ) {
+    const now = new Date();
+    const cancelWrite = await setRunStatusIfRunning(run.id, "cancelled", {
+      error: deferral.message,
+      errorCode: SUBSCRIPTION_ACCOUNT_CAPACITY_ERROR_CODE,
+      finishedAt: now,
+      resultJson: {
+        subscriptionAccountCapacity: {
+          providers: deferral.providers,
+          deferralAttempt: deferral.deferralAttempt,
+        },
+      },
+    });
+    if (!cancelWrite.updated) return;
+
+    await setWakeupStatus(run.wakeupRequestId, "cancelled", {
+      finishedAt: now,
+      error: deferral.message,
+    }).catch(() => undefined);
+
+    const cancelledRun = cancelWrite.run ?? (await getRun(run.id).catch(() => null));
+    const agentRow = await getAgent(run.agentId).catch(() => null);
+    let scheduleOutcome: string | null = null;
+    if (cancelledRun && agentRow) {
+      const scheduleResult = await scheduleBoundedRetryForRun(cancelledRun, agentRow, {
+        now,
+        retryReason: SUBSCRIPTION_ACCOUNT_CAPACITY_RETRY_REASON,
+        wakeReason: SUBSCRIPTION_ACCOUNT_CAPACITY_RETRY_WAKE_REASON,
+        // Capacity contention is bounded by live sessions, not by an attempt
+        // counter. Keep an execution path until a managed slot is released.
+        maxAttempts: (cancelledRun.scheduledRetryAttempt ?? 0) + 1,
+        delayMs: computeSubscriptionAccountCapacityRetryDelayMs(),
+        resetSubscriptionProviderSelection: true,
+      }).catch((scheduleErr) => {
+        logger.error(
+          { err: scheduleErr, runId: run.id },
+          "failed to schedule subscription-account capacity retry",
+        );
+        return null;
+      });
+      scheduleOutcome = scheduleResult?.outcome ?? null;
+    }
+
+    if (cancelledRun) {
+      await appendRunEvent(cancelledRun, await nextRunEventSeq(cancelledRun.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "info",
+        message: scheduleOutcome === "scheduled"
+          ? "Deferred: managed subscription accounts are busy; an automatic retry was scheduled."
+          : "Deferred: managed subscription accounts are busy, but no retry could be scheduled.",
+        payload: {
+          providers: deferral.providers,
+          deferralAttempt: deferral.deferralAttempt,
+          retryScheduled: scheduleOutcome === "scheduled",
+        },
+      }).catch(() => undefined);
+    }
+
+    if (cancelledRun && scheduleOutcome !== "scheduled") {
+      await releaseIssueExecutionAndPromote(cancelledRun).catch((releaseErr) => {
+        logger.error(
+          { err: releaseErr, runId: run.id },
+          "failed to release issue execution after subscription-account capacity deferral",
+        );
+      });
+    }
+
+    await finalizeAgentStatus(run.agentId, "cancelled", null, {
+      wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
+    }).catch(() => undefined);
+  }
+
   async function scheduleInteractionContinuationInfrastructureRetryIfEligible(
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
@@ -12436,7 +12644,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .innerJoin(agents, eq(agents.id, heartbeatRuns.agentId))
       .where(and(
         eq(heartbeatRuns.status, "running"),
-        inArray(agents.adapterType, ["codex_local", "claude_local"]),
+        sql`coalesce(
+          nullif(${heartbeatRuns.contextSnapshot} ->> 'paperclipEffectiveAdapterType', ''),
+          ${agents.adapterType}
+        ) in ('codex_local', 'claude_local')`,
       ));
     return Number(count ?? 0);
   }
@@ -12487,7 +12698,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           from heartbeat_runs running_run
           join agents running_agent on running_agent.id = running_run.agent_id
           where running_run.status = 'running'
-            and running_agent.adapter_type in ('codex_local', 'claude_local')
+            and coalesce(
+              nullif(running_run.context_snapshot ->> 'paperclipEffectiveAdapterType', ''),
+              running_agent.adapter_type
+            ) in ('codex_local', 'claude_local')
         ) as running_sessions,
         (
           select count(*)::integer
@@ -12496,7 +12710,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           join companies governance_company on governance_company.id = governance_run.company_id
           where governance_run.status = 'running'
             and governance_run.agent_id in (${governanceAgentIdList})
-            and governance_agent.adapter_type in ('codex_local', 'claude_local')
+            and coalesce(
+              nullif(governance_run.context_snapshot ->> 'paperclipEffectiveAdapterType', ''),
+              governance_agent.adapter_type
+            ) in ('codex_local', 'claude_local')
             and governance_company.status = 'active'
         ) as governance_running_sessions,
         exists (
@@ -13542,15 +13759,30 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const now = new Date();
 
     // Find all runs stuck in "running" state (queued runs are legitimately waiting; resumeQueuedRuns handles them)
-    const activeRuns = await db
+    const activeRunRows = await db
       .select({
         run: heartbeatRuns,
-        adapterType: agents.adapterType,
+        adapterType: sql<string>`coalesce(
+          nullif(${heartbeatRuns.contextSnapshot} ->> 'paperclipEffectiveAdapterType', ''),
+          ${agents.adapterType}
+        )`.as("adapterType"),
+        agentAdapterType: agents.adapterType,
         adapterConfig: agents.adapterConfig,
+        agentRuntimeConfig: agents.runtimeConfig,
       })
       .from(heartbeatRuns)
       .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
       .where(eq(heartbeatRuns.status, "running"));
+    const activeRuns = activeRunRows.map((row) => ({
+      run: row.run,
+      adapterType: row.adapterType,
+      adapterConfig: resolveSubscriptionAdapterConfig({
+        adapterConfig: parseObject(row.adapterConfig),
+        agentAdapterType: row.agentAdapterType,
+        effectiveAdapterType: row.adapterType,
+        failover: readSubscriptionFailoverConfig(row.agentRuntimeConfig),
+      }),
+    }));
 
     const monitorIssueIds = [...new Set(activeRuns.flatMap(({ run }) => {
       const runContext = parseObject(run.contextSnapshot);
@@ -14043,7 +14275,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
   async function refillCapacityAfterRun(agentId: string) {
     const completedAgent = await getAgent(agentId).catch(() => null);
-    if (completedAgent?.adapterType === "codex_local" || completedAgent?.adapterType === "claude_local") {
+    if (
+      completedAgent?.adapterType === "codex_local"
+      || completedAgent?.adapterType === "claude_local"
+    ) {
       await pumpQueuedLlmRunsGlobally();
       return;
     }
@@ -14123,11 +14358,236 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       return;
     }
 
-    const runtime = await ensureRuntimeState(agent);
     const context = parseObject(run.contextSnapshot);
     const taskKey = deriveTaskKeyWithHeartbeatFallback(context, null);
-    const sessionCodec = getAdapterSessionCodec(agent.adapterType);
     const issueId = readNonEmptyString(context.issueId);
+    const failoverConfig = isSubscriptionAdapterType(agent.adapterType)
+      ? readSubscriptionFailoverConfig(agent.runtimeConfig)
+      : null;
+    const forcedFailoverAdapter = isSubscriptionAdapterType(context.paperclipEffectiveAdapterType)
+      && failoverConfig?.order.includes(context.paperclipEffectiveAdapterType)
+      ? context.paperclipEffectiveAdapterType
+      : null;
+    let effectiveAdapterType =
+      resolveEffectiveSubscriptionAdapter({
+        agentAdapterType: agent.adapterType,
+        runtimeConfig: agent.runtimeConfig,
+        contextSnapshot: context,
+      }) ?? agent.adapterType;
+    const priorRuntimeState = await getRuntimeState(agent.id);
+    const priorEffectiveAdapter = isSubscriptionAdapterType(priorRuntimeState?.adapterType)
+      ? priorRuntimeState.adapterType
+      : null;
+
+    let selectedProviderEnv: Record<string, string> = {};
+
+    async function stampRunProviderContext() {
+      const stamped = await db
+        .update(heartbeatRuns)
+        .set({ contextSnapshot: context, updatedAt: new Date() })
+        .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "running")))
+        .returning({ id: heartbeatRuns.id })
+        .then((rows) => rows[0] ?? null);
+      if (!stamped) {
+        throw new Error(`Heartbeat run ${run.id} left running state during provider selection`);
+      }
+    }
+
+    async function selectAccountForProvider(
+      adapterType: SubscriptionAdapterType,
+      opts: { preferAvailableOnly: boolean },
+    ): Promise<
+      | { status: "ready" }
+      | {
+          status: "unavailable";
+          provider: SubscriptionAdapterType;
+          reason: "no_authenticated" | "capacity_exhausted" | "quota_exhausted";
+          authenticatedCount: number;
+          withinSessionLimitCount: number;
+          availableQuotaCount: number;
+        }
+    > {
+      const unavailable = (
+        reason: "no_authenticated" | "capacity_exhausted" | "quota_exhausted",
+        diagnostics?: {
+          authenticatedCount: number;
+          withinSessionLimitCount: number;
+          availableQuotaCount: number;
+        },
+      ) => ({
+        status: "unavailable" as const,
+        provider: adapterType,
+        reason,
+        authenticatedCount: diagnostics?.authenticatedCount ?? 0,
+        withinSessionLimitCount: diagnostics?.withinSessionLimitCount ?? 0,
+        availableQuotaCount: diagnostics?.availableQuotaCount ?? 0,
+      });
+
+      if (adapterType === "codex_local") {
+        if (agent.codexAccountMode === "host") return { status: "ready" };
+        const mode = agent.codexAccountMode === "fixed" ? "fixed" : "first_available";
+        const fixedAccountId = mode === "fixed" ? agent.codexAccountId : null;
+        if (mode === "fixed" && !fixedAccountId) return unavailable("no_authenticated");
+        return withCodexAccountSelectionLock(agent.companyId, async () => {
+          const diagnostics = await resolveFirstAvailableCodexAccountWithDiagnostics(db, agent.companyId, {
+            excludeRunId: run.id,
+            preferAvailableOnly: mode === "fixed" ? false : opts.preferAvailableOnly,
+            ...(fixedAccountId ? { accountId: fixedAccountId } : {}),
+          });
+          const selection = diagnostics.selection;
+          if (!selection) {
+            return unavailable(
+              diagnostics.reason === "selected" ? "no_authenticated" : diagnostics.reason,
+              diagnostics,
+            );
+          }
+          selectedProviderEnv = resolveCodexManagedAccountRunEnv(selection.codexHome);
+          context.paperclipCodexAccount = {
+            mode,
+            accountId: selection.accountId,
+            accountName: selection.accountName,
+            quotaState: selection.quotaState,
+          };
+          await stampRunProviderContext();
+          return { status: "ready" as const };
+        });
+      }
+
+      if (agent.claudeAccountMode === "host") return { status: "ready" };
+      const mode = agent.claudeAccountMode === "fixed" ? "fixed" : "first_available";
+      const fixedAccountId = mode === "fixed" ? agent.claudeAccountId : null;
+      if (mode === "fixed" && !fixedAccountId) return unavailable("no_authenticated");
+      return withClaudeAccountSelectionLock(agent.companyId, async () => {
+        const diagnostics = await resolveFirstAvailableClaudeAccountWithDiagnostics(db, agent.companyId, {
+          excludeRunId: run.id,
+          preferAvailableOnly: mode === "fixed" ? false : opts.preferAvailableOnly,
+          ...(fixedAccountId ? { accountId: fixedAccountId } : {}),
+        });
+        const selection = diagnostics.selection;
+        if (!selection) {
+          return unavailable(
+            diagnostics.reason === "selected" ? "no_authenticated" : diagnostics.reason,
+            diagnostics,
+          );
+        }
+        selectedProviderEnv = resolveClaudeManagedAccountRunEnv(selection.claudeConfigDir);
+        context.paperclipClaudeAccount = {
+          mode,
+          accountId: selection.accountId,
+          accountName: selection.accountName,
+          quotaState: selection.quotaState,
+        };
+        await stampRunProviderContext();
+        return { status: "ready" as const };
+      });
+    }
+
+    delete context.paperclipCodexAccount;
+    delete context.paperclipClaudeAccount;
+
+    if (failoverConfig && !forcedFailoverAdapter) {
+      const [primary, secondary] = failoverConfig.order;
+      const primaryResult = await selectAccountForProvider(primary, { preferAvailableOnly: true });
+      if (primaryResult.status === "ready") {
+        effectiveAdapterType = primary;
+      } else {
+        const secondaryResult = await selectAccountForProvider(secondary, { preferAvailableOnly: true });
+        if (secondaryResult.status === "ready") {
+          effectiveAdapterType = secondary;
+        } else {
+          const primaryFallback = primaryResult.reason === "quota_exhausted"
+            ? await selectAccountForProvider(primary, { preferAvailableOnly: false })
+            : primaryResult;
+          if (primaryFallback.status === "ready") {
+            effectiveAdapterType = primary;
+          } else {
+            const secondaryFallback = secondaryResult.reason === "quota_exhausted"
+              ? await selectAccountForProvider(secondary, { preferAvailableOnly: false })
+              : secondaryResult;
+            if (secondaryFallback.status === "ready") {
+              effectiveAdapterType = secondary;
+            } else {
+              const capacityProviders = [primaryFallback, secondaryFallback]
+                .filter((result) => result.reason === "capacity_exhausted")
+                .map((result) => result.provider);
+              if (capacityProviders.length > 0) {
+                throw new SubscriptionAccountCapacityDeferral(
+                  capacityProviders,
+                  run.scheduledRetryAttempt ?? 0,
+                );
+              }
+            throw new ConfigurationIncompleteFailure(
+              "configuration incomplete: neither configured subscription provider has an authenticated account.",
+              {
+                configurationIncomplete: {
+                  reason: "subscription_accounts_unavailable",
+                  companyId: agent.companyId,
+                  agentId: agent.id,
+                  issueId: issueId ?? null,
+                  adapterType: primary,
+                  missingBindings: [],
+                },
+              },
+            );
+            }
+          }
+        }
+      }
+    } else if (isSubscriptionAdapterType(effectiveAdapterType)) {
+      const selected = await selectAccountForProvider(effectiveAdapterType, {
+        preferAvailableOnly: false,
+      });
+      if (selected.status === "unavailable" && selected.reason === "capacity_exhausted") {
+        throw new SubscriptionAccountCapacityDeferral(
+          [effectiveAdapterType],
+          run.scheduledRetryAttempt ?? 0,
+        );
+      }
+      if (selected.status === "unavailable") {
+        throw new ConfigurationIncompleteFailure(
+          `configuration incomplete: ${effectiveAdapterType === "codex_local" ? "Codex" : "Claude"} account selection requires an authenticated account.`,
+          {
+            configurationIncomplete: {
+              reason: effectiveAdapterType === "codex_local"
+                ? "codex_account_unavailable"
+                : "claude_account_unavailable",
+              companyId: agent.companyId,
+              agentId: agent.id,
+              issueId: issueId ?? null,
+              adapterType: effectiveAdapterType,
+              missingBindings: [],
+            },
+          },
+        );
+      }
+    }
+
+    if (isSubscriptionAdapterType(effectiveAdapterType)) {
+      context.paperclipEffectiveAdapterType = effectiveAdapterType;
+      if (
+        (priorEffectiveAdapter && priorEffectiveAdapter !== effectiveAdapterType)
+        || (!priorEffectiveAdapter && effectiveAdapterType !== agent.adapterType)
+      ) {
+        context.forceFreshSession = true;
+      }
+    } else {
+      delete context.paperclipEffectiveAdapterType;
+    }
+    if (effectiveAdapterType !== agent.adapterType) {
+      // Wakeup enrichment still reads the legacy primary adapter. Never feed
+      // those explicit resume parameters into a different provider. The task
+      // session lookup below is keyed by the effective provider, so its own
+      // compatible session may still be reused on ordinary preferred-provider
+      // runs; quota failover explicitly sets forceFreshSession.
+      delete context.resumeSessionParams;
+      delete context.resumeSessionDisplayId;
+    }
+    await stampRunProviderContext();
+
+    const effectiveAgent = { ...agent, adapterType: effectiveAdapterType };
+    const runtime = await ensureRuntimeState(effectiveAgent);
+    const runtimeMatchesAdapter = runtime.adapterType === effectiveAdapterType;
+    const sessionCodec = getAdapterSessionCodec(effectiveAdapterType);
     let issueContext = issueId ? await getIssueExecutionContext(agent.companyId, issueId) : null;
     const issueDependencyReadiness = issueId
       ? await issuesSvc.listDependencyReadiness(agent.companyId, [issueId]).then((rows) => rows.get(issueId) ?? null)
@@ -14302,15 +14762,26 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           }
         : null,
     });
-    const config = parseObject(agent.adapterConfig);
+    const config = resolveSubscriptionAdapterConfig({
+      adapterConfig: parseObject(agent.adapterConfig),
+      agentAdapterType: agent.adapterType,
+      effectiveAdapterType,
+      failover: failoverConfig,
+    });
+    const effectiveIssueAdapterConfig = resolveSubscriptionAdapterConfig({
+      adapterConfig: parseObject(issueAssigneeOverrides?.adapterConfig),
+      agentAdapterType: agent.adapterType,
+      effectiveAdapterType,
+      failover: failoverConfig,
+    });
     const taskSession = taskKey
-      ? await getTaskSession(agent.companyId, agent.id, agent.adapterType, taskKey)
+      ? await getTaskSession(agent.companyId, agent.id, effectiveAdapterType, taskKey)
       : null;
     const taskSessionDecodedParams = normalizeSessionParams(
       sessionCodec.deserialize(taskSession?.sessionParamsJson ?? null),
     );
     const explicitResumeSessionParams = normalizeResumeParamsForAdapter(
-      agent.adapterType,
+      effectiveAdapterType,
       sessionCodec.deserialize(parseObject(context.resumeSessionParams)),
     );
     const explicitResumeSessionDisplayId = truncateDisplayId(
@@ -14669,7 +15140,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     let adapterModelProfiles: AdapterModelProfileDefinition[] = [];
     let profileResolutionFallbackReason: string | null = null;
     try {
-      adapterModelProfiles = await listAdapterModelProfiles(agent.adapterType);
+      adapterModelProfiles = await listAdapterModelProfiles(effectiveAdapterType);
     } catch (error) {
       profileResolutionFallbackReason = "adapter_profile_resolution_failed";
       logger.warn(
@@ -14677,7 +15148,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           err: error,
           companyId: agent.companyId,
           agentId: agent.id,
-          adapterType: agent.adapterType,
+          adapterType: effectiveAdapterType,
           runId: run.id,
         },
         "Failed to resolve adapter model profiles; falling back to primary adapter config",
@@ -14689,6 +15160,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueModelProfile: issueAssigneeOverrides?.modelProfile ?? null,
       contextSnapshot: context,
       profileResolutionFallbackReason,
+      transformRuntimeAdapterConfig: (adapterConfig) => resolveSubscriptionAdapterConfig({
+        adapterConfig,
+        agentAdapterType: agent.adapterType,
+        effectiveAdapterType,
+        failover: failoverConfig,
+      }),
     });
     const modelProfileMetadata = modelProfileRunMetadata(modelProfileApplication);
     if (modelProfileMetadata) {
@@ -14700,129 +15177,55 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const mergedConfig = mergeModelProfileAdapterConfig({
       baseConfig: workspaceManagedConfig,
       modelProfile: modelProfileApplication,
-      issueAdapterConfig: issueAssigneeOverrides?.adapterConfig ?? null,
+      issueAdapterConfig: effectiveIssueAdapterConfig,
     });
     const configSnapshot = buildExecutionWorkspaceConfigSnapshot(mergedConfig, selectedEnvironmentId);
     let executionRunConfig = stripWorkspaceRuntimeFromExecutionRunConfig(mergedConfig);
-    if (agent.adapterType === "codex_local" && agent.codexAccountMode === "first_available") {
-      const selection = await withCodexAccountSelectionLock(agent.companyId, async () => {
-        const selected = await resolveFirstAvailableCodexAccount(db, agent.companyId, {
-          excludeRunId: run.id,
-        });
-        if (!selected) {
-          throw new ConfigurationIncompleteFailure(
-            "configuration incomplete: automatic Codex account selection requires at least one authenticated account.",
-            {
-              configurationIncomplete: {
-                reason: "codex_account_unavailable",
-                companyId: agent.companyId,
-                agentId: agent.id,
-                issueId: issueId ?? null,
-                adapterType: "codex_local",
-                missingBindings: [],
-              },
-            },
-          );
-        }
-        context.paperclipCodexAccount = {
-          mode: "first_available",
-          accountId: selected.accountId,
-          accountName: selected.accountName,
-          quotaState: selected.quotaState,
-        };
-        const stamped = await db
-          .update(heartbeatRuns)
-          .set({ contextSnapshot: context, updatedAt: new Date() })
-          .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "running")))
-          .returning({ id: heartbeatRuns.id })
-          .then((rows) => rows[0] ?? null);
-        if (!stamped) {
-          throw new Error(`Heartbeat run ${run.id} left running state during Codex account selection`);
-        }
-        return selected;
-      });
+    if (Object.keys(selectedProviderEnv).length > 0) {
       executionRunConfig = {
         ...executionRunConfig,
         env: {
           ...parseObject(executionRunConfig.env),
-          CODEX_HOME: selection.codexHome,
+          ...selectedProviderEnv,
         },
       };
-    } else {
-      delete context.paperclipCodexAccount;
-    }
-    if (agent.adapterType === "claude_local" && agent.claudeAccountMode === "first_available") {
-      const selection = await withClaudeAccountSelectionLock(agent.companyId, async () => {
-        const selected = await resolveFirstAvailableClaudeAccount(db, agent.companyId, {
-          excludeRunId: run.id,
-        });
-        if (!selected) {
-          throw new ConfigurationIncompleteFailure(
-            "configuration incomplete: automatic Claude account selection requires at least one authenticated account.",
-            {
-              configurationIncomplete: {
-                reason: "claude_account_unavailable",
-                companyId: agent.companyId,
-                agentId: agent.id,
-                issueId: issueId ?? null,
-                adapterType: "claude_local",
-                missingBindings: [],
-              },
-            },
-          );
-        }
-        context.paperclipClaudeAccount = {
-          mode: "first_available",
-          accountId: selected.accountId,
-          accountName: selected.accountName,
-          quotaState: selected.quotaState,
-        };
-        const stamped = await db.update(heartbeatRuns)
-          .set({ contextSnapshot: context, updatedAt: new Date() })
-          .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "running")))
-          .returning({ id: heartbeatRuns.id })
-          .then((rows) => rows[0] ?? null);
-        if (!stamped) {
-          throw new Error(`Heartbeat run ${run.id} left running state during Claude account selection`);
-        }
-        return selected;
-      });
-      executionRunConfig = {
-        ...executionRunConfig,
-        env: {
-          ...parseObject(executionRunConfig.env),
-          CLAUDE_CONFIG_DIR: selection.claudeConfigDir,
-          CLAUDE_SECURESTORAGE_CONFIG_DIR: selection.claudeConfigDir,
-        },
-      };
-    } else {
-      delete context.paperclipClaudeAccount;
     }
     const runScopedMentionedSkillKeys = await resolveRunScopedMentionedSkillKeys({
       db,
       companyId: agent.companyId,
       issueId,
     });
+    const sanitizeProviderBindingEnvForExecution = (env: unknown) =>
+      sanitizeResolvedSubscriptionAdapterConfig({
+        adapterConfig: { env },
+        agentAdapterType: agent.adapterType,
+        effectiveAdapterType,
+      }).env ?? null;
+    const environmentEnvForExecution = sanitizeProviderBindingEnvForExecution(
+      selectedEnvironmentForConfig?.envVars ?? null,
+    );
+    const projectEnvForExecution = sanitizeProviderBindingEnvForExecution(projectContext?.env ?? null);
+    const routineEnvForExecution = sanitizeProviderBindingEnvForExecution(routineEnvContext.env);
     const pushCapabilityPreflightRequired = requiresPushCapabilityPreflight({
-      adapterType: agent.adapterType,
+      adapterType: effectiveAdapterType,
       issueId,
       explicitRunScopedSkillKeys: runScopedMentionedSkillKeys,
     });
     const { resolvedConfig, secretKeys, secretManifest } = await resolveExecutionRunAdapterConfig({
       companyId: agent.companyId,
       agentId: agent.id,
-      adapterType: agent.adapterType,
+      adapterType: effectiveAdapterType,
       issueId,
       heartbeatRunId: run.id,
       environmentId: selectedEnvironmentForConfig?.id ?? null,
-      environmentEnv: selectedEnvironmentForConfig?.envVars ?? null,
+      environmentEnv: environmentEnvForExecution,
       environmentDriver: selectedEnvironmentForConfig?.driver ?? null,
       projectId: projectContext?.id ?? null,
       routineId: routineEnvContext.routineId,
       responsibleUserId,
       executionRunConfig,
-      projectEnv: projectContext?.env ?? null,
-      routineEnv: routineEnvContext.env,
+      projectEnv: projectEnvForExecution,
+      routineEnv: routineEnvForExecution,
       secretsSvc,
       trustPreset,
       requiredScopedEnvBinding: pushCapabilityPreflightRequired
@@ -14842,8 +15245,30 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } else {
       delete context.paperclipSecrets;
     }
+    const providerSanitizedResolvedConfig = sanitizeResolvedSubscriptionAdapterConfig({
+      adapterConfig: resolvedConfig,
+      agentAdapterType: agent.adapterType,
+      effectiveAdapterType,
+    });
+    const providerEnvOverrides = {
+      ...resolveCrossProviderProcessEnvOverrides({
+        processEnv: process.env,
+        agentAdapterType: agent.adapterType,
+        effectiveAdapterType,
+      }),
+      ...selectedProviderEnv,
+    };
+    const providerPinnedResolvedConfig = Object.keys(providerEnvOverrides).length > 0
+      ? {
+          ...providerSanitizedResolvedConfig,
+          env: {
+            ...parseObject(providerSanitizedResolvedConfig.env),
+            ...providerEnvOverrides,
+          },
+        }
+      : providerSanitizedResolvedConfig;
     const effectiveResolvedConfig = applyRunScopedMentionedSkillKeys(
-      resolvedConfig,
+      providerPinnedResolvedConfig,
       runScopedMentionedSkillKeys,
     );
     const runtimeSkillPreference = readPaperclipSkillSyncPreference(effectiveResolvedConfig);
@@ -14858,7 +15283,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
     const latestAgentConfigRevision = await getLatestAgentConfigRevision(agent.companyId, agent.id);
     const sessionConfigMetadata = await buildEffectiveRunSessionConfigMetadata({
-      adapterType: agent.adapterType,
+      adapterType: effectiveAdapterType,
       effectiveAdapterConfig: runtimeConfig,
       agentRuntimeConfig: agent.runtimeConfig,
       modelProfile: modelProfileMetadata,
@@ -14903,9 +15328,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           : null,
         executionPolicy,
       },
-      environmentEnv: selectedEnvironmentForConfig?.envVars ?? null,
-      projectEnv: projectContext?.env ?? null,
-      routineEnv: routineEnvContext.env,
+      environmentEnv: environmentEnvForExecution,
+      projectEnv: projectEnvForExecution,
+      routineEnv: routineEnvForExecution,
       secretManifest,
       runtimeSkills: runtimeSkillEntries,
       agentConfigRevision: latestAgentConfigRevision
@@ -14931,11 +15356,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const taskSessionForRun = resetTaskSession ? null : taskSession;
     const previousSessionParams =
       explicitResumeSessionParams ??
-      (isCanonicalSessionIdForAdapter(agent.adapterType, explicitResumeSessionDisplayId)
+      (isCanonicalSessionIdForAdapter(effectiveAdapterType, explicitResumeSessionDisplayId)
         ? { sessionId: explicitResumeSessionDisplayId }
         : null) ??
       normalizeResumeParamsForAdapter(
-        agent.adapterType,
+        effectiveAdapterType,
         stripPaperclipSessionMetadataFromSessionParams(
           sessionCodec.deserialize(taskSessionForRun?.sessionParamsJson ?? null),
         ),
@@ -15362,7 +15787,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       companyId: agent.companyId,
       selectedEnvironmentId,
       localEnvironmentId: localEnvironment.id,
-      adapterType: agent.adapterType,
+      adapterType: effectiveAdapterType,
       issueId: issueId ?? null,
       heartbeatRunId: run.id,
       agentId: agent.id,
@@ -15402,7 +15827,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const realizationResult = await envOrchestrator.realizeForRun({
       environment: selectedEnvironment,
       lease: activeEnvironmentLease.lease,
-      adapterType: agent.adapterType,
+      adapterType: effectiveAdapterType,
       companyId: agent.companyId,
       issueId: issueId ?? null,
       heartbeatRunId: run.id,
@@ -15586,9 +16011,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     if (executionWorkspace.projectId && !readNonEmptyString(context.projectId)) {
       context.projectId = executionWorkspace.projectId;
     }
-    const runtimeSessionFallback = taskKey || resetTaskSession
+    const runtimeSessionFallback = taskKey || resetTaskSession || !runtimeMatchesAdapter
       ? null
-      : isCanonicalSessionIdForAdapter(agent.adapterType, runtime.sessionId)
+      : isCanonicalSessionIdForAdapter(effectiveAdapterType, runtime.sessionId)
         ? runtime.sessionId
         : null;
     const runtimeSessionDisplayId = truncateDisplayId(
@@ -15598,10 +16023,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         readNonEmptyString(runtimeSessionParams?.sessionId) ??
         runtimeSessionFallback,
     );
-    let previousSessionDisplayId = requiresCanonicalSessionIds(agent.adapterType)
+    let previousSessionDisplayId = requiresCanonicalSessionIds(effectiveAdapterType)
       ? truncateDisplayId(
           readNonEmptyString(previousSessionParams?.sessionId) ??
-            (isCanonicalSessionIdForAdapter(agent.adapterType, runtimeSessionDisplayId) ? runtimeSessionDisplayId : null) ??
+            (isCanonicalSessionIdForAdapter(effectiveAdapterType, runtimeSessionDisplayId) ? runtimeSessionDisplayId : null) ??
             runtimeSessionFallback,
         )
       : runtimeSessionDisplayId;
@@ -15612,7 +16037,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     );
 
     const sessionCompaction = await evaluateSessionCompaction({
-      agent,
+      agent: effectiveAgent,
       sessionId: previousSessionDisplayId ?? runtimeSessionIdForAdapter,
       issueId,
       continuationSummaryBody: continuationSummary?.body ?? null,
@@ -15874,7 +16299,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         await onLog(logEntry.stream, logEntry.chunk);
       }
       await assertGitSensitiveAdapterWorkspaceValid({
-        adapterType: agent.adapterType,
+        adapterType: effectiveAdapterType,
         agentId: agent.id,
         issue: issueRef
           ? {
@@ -15983,7 +16408,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         });
       };
 
-      const adapter = getServerAdapter(agent.adapterType);
+      const adapter = getServerAdapter(effectiveAdapterType);
       const localAgentJwtScope =
         issueRef?.workMode === "skill_test"
           ? { kind: "skill_test" as const, issueId: issueRef.id }
@@ -15992,7 +16417,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ? createLocalAgentJwt(
           agent.id,
           agent.companyId,
-          agent.adapterType,
+          effectiveAdapterType,
           run.id,
           run.responsibleUserId,
           localAgentJwtScope,
@@ -16004,7 +16429,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             companyId: agent.companyId,
             agentId: agent.id,
             runId: run.id,
-            adapterType: agent.adapterType,
+            adapterType: effectiveAdapterType,
           },
           "local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY",
         );
@@ -16092,7 +16517,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                   phase: "workspace_finalize",
                   cwd: executionWorkspace.cwd,
                   metadata: {
-                    adapterType: agent.adapterType,
+                    adapterType: effectiveAdapterType,
                     executionTargetKind: executionTarget?.kind ?? "local",
                     ...metadata,
                     managedGitWorktreeBranch: finalizeBranchMetadata,
@@ -16139,7 +16564,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 phase: "workspace_finalize",
                 cwd: executionWorkspace.cwd,
                 metadata: {
-                  adapterType: agent.adapterType,
+                  adapterType: effectiveAdapterType,
                   executionTargetKind: executionTarget?.kind ?? "local",
                   ...metadata,
                   managedGitWorktreeBranch: finalizeBranchMetadata,
@@ -16157,7 +16582,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                   workspaceValidation: {
                     reason: "git_worktree_branch_incoherence",
                     fingerprint: workspaceValidationFingerprint,
-                    adapterType: agent.adapterType,
+                    adapterType: effectiveAdapterType,
                     issueId: issueRef?.id ?? null,
                     issueIdentifier: issueRef?.identifier ?? null,
                     persistedExecutionWorkspaceId: branchInspection.workspaceRecord.id,
@@ -16173,7 +16598,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           phase: "workspace_finalize",
           cwd: executionWorkspace.cwd,
           metadata: {
-            adapterType: agent.adapterType,
+            adapterType: effectiveAdapterType,
             executionTargetKind: executionTarget?.kind ?? "local",
             ...metadata,
             ...(finalizeBranchMetadata ? { managedGitWorktreeBranch: finalizeBranchMetadata } : {}),
@@ -16192,13 +16617,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         const adapterContext = { ...context };
         const runtimeMcpServers = await buildPaperclipRuntimeMcpServers({
           db,
-          agent,
+          agent: effectiveAgent,
           runId: run.id,
         });
         const runtimeMcp = createAdapterRuntimeMcpAccess(runtimeMcpServers);
         const managedMcpConfig = await createManagedMcpRunConfig({
           db,
-          agent,
+          agent: effectiveAgent,
           runId: run.id,
           config: runtimeConfig,
           projectId: issueRef?.projectId ?? null,
@@ -16209,7 +16634,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
         adapterResult = await adapter.execute({
           runId: run.id,
-          agent,
+          agent: effectiveAgent,
           runtime: runtimeForAdapter,
           config: runtimeConfig,
           context: adapterContext,
@@ -16314,7 +16739,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const adapterManagedRuntimeServices = adapterResult.runtimeServices
         ? await persistAdapterManagedRuntimeServices({
             db,
-            adapterType: agent.adapterType,
+            adapterType: effectiveAdapterType,
             runId: run.id,
             agent: {
               id: agent.id,
@@ -16372,7 +16797,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
 
       const nextSessionState = resolveNextSessionState({
-        adapterType: agent.adapterType,
+        adapterType: effectiveAdapterType,
         codec: sessionCodec,
         adapterResult,
         outcome,
@@ -16468,7 +16893,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           : null;
 
       const persistedResultJson = mergeHeartbeatRunResultJson(
-        mergeRunStopMetadataForAgent(agent, outcome, {
+        mergeRunStopMetadataForAgent({ ...effectiveAgent, adapterConfig: runtimeConfig }, outcome, {
           resultJson: mergeModelProfileRunMetadata(
             mergeAdapterRecoveryMetadata({
               resultJson: {
@@ -16640,20 +17065,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
 
       if (finalizedRun) {
-        await updateRuntimeState(agent, finalizedRun, adapterResult, {
+        await updateRuntimeState(effectiveAgent, finalizedRun, adapterResult, {
           legacySessionId: nextSessionState.legacySessionId,
         }, normalizedUsage);
         if (taskKey) {
           if (adapterResult.clearSession || (!nextSessionState.params && !nextSessionState.displayId)) {
             await clearTaskSessions(agent.companyId, agent.id, {
               taskKey,
-              adapterType: agent.adapterType,
+              adapterType: effectiveAdapterType,
             });
           } else {
             await upsertTaskSession({
               companyId: agent.companyId,
               agentId: agent.id,
-              adapterType: agent.adapterType,
+              adapterType: effectiveAdapterType,
               taskKey,
               sessionParamsJson: attachPaperclipSessionMetadataToSessionParams(
                 nextSessionState.params,
@@ -16715,7 +17140,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         error: message,
         errorCode: failureErrorCode,
         finishedAt: new Date(),
-        resultJson: mergeRunStopMetadataForAgent(agent, "failed", {
+        resultJson: mergeRunStopMetadataForAgent({ ...effectiveAgent, adapterConfig: runtimeConfig }, "failed", {
           errorCode: failureErrorCode,
           errorMessage: message,
           resultJson: workspaceValidationFailure?.resultJson ?? configurationIncompleteFailure?.resultJson ?? null,
@@ -16774,7 +17199,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         await releaseIssueExecutionAndPromote(livenessRun);
         await handleIssueReviewPathDisposition(livenessRun);
 
-        await updateRuntimeState(agent, livenessRun, {
+        await updateRuntimeState(effectiveAgent, livenessRun, {
           exitCode: null,
           signal: null,
           timedOut: false,
@@ -16787,7 +17212,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           await upsertTaskSession({
             companyId: agent.companyId,
             agentId: agent.id,
-            adapterType: agent.adapterType,
+            adapterType: effectiveAdapterType,
             taskKey,
             sessionParamsJson: attachPaperclipSessionMetadataToSessionParams(
               previousSessionParams,
@@ -16807,7 +17232,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       });
     }
     } catch (outerErr) {
-          if (isWorkspaceBusyDeferral(outerErr)) {
+        if (isSubscriptionAccountCapacityDeferral(outerErr)) {
+          await finalizeSubscriptionAccountCapacityDeferral(run, outerErr).catch((deferralErr) => {
+            logger.error(
+              { err: deferralErr, runId },
+              "failed to finalize subscription-account capacity deferral",
+            );
+          });
+        } else if (isWorkspaceBusyDeferral(outerErr)) {
             // Expected contention on a shared project workspace, not a
             // failure: park the run as a bounded scheduled retry and leave the
             // holder undisturbed. The finally block below still releases

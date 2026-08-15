@@ -1,12 +1,4 @@
-/**
- * Cross-provider Codex/Claude subscription failover helpers.
- *
- * The active installation wires this contract into both retry scheduling and
- * provider execution. This source checkout intentionally keeps the helper
- * isolated until that complete execution overlay is ported; wiring only the
- * scheduler here would label a Claude retry that this source still executes as
- * Codex after a rebuild.
- */
+/** Cross-provider Codex/Claude subscription failover helpers. */
 export type SubscriptionAdapterType = "codex_local" | "claude_local";
 
 export interface SubscriptionFailoverConfig {
@@ -25,18 +17,164 @@ export interface SubscriptionFailoverRetryTiming {
   quotaNotBeforeByProvider: Partial<Record<SubscriptionAdapterType, string>>;
 }
 
+const CROSS_PROVIDER_CONFIG_KEYS = [
+  "cwd",
+  "instructionsFilePath",
+  "promptTemplate",
+  "env",
+  "workspaceStrategy",
+  "workspaceRuntime",
+  "filesystemScope",
+  "filesystemExtraPaths",
+  "filesystemSandboxCommand",
+  "networkScope",
+  "networkAllowlist",
+  "timeoutSec",
+  "graceSec",
+] as const;
+
+const PROVIDER_SPECIFIC_ENV_KEYS = new Set([
+  "CODEX_HOME",
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "CLAUDE_CONFIG_DIR",
+  "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+]);
+
+const PROVIDER_SPECIFIC_ENV_PREFIXES = [
+  "OPENAI_",
+  "CODEX_",
+  "ANTHROPIC_",
+  "CLAUDE_",
+  "AZURE_OPENAI_",
+] as const;
+
+const PROVIDER_ENV_PREFIXES: Record<SubscriptionAdapterType, readonly string[]> = {
+  codex_local: ["OPENAI_", "CODEX_", "AZURE_OPENAI_"],
+  claude_local: ["ANTHROPIC_", "CLAUDE_"],
+};
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
 }
 
-function isSubscriptionAdapterType(value: unknown): value is SubscriptionAdapterType {
+export function isSubscriptionAdapterType(value: unknown): value is SubscriptionAdapterType {
   return value === "codex_local" || value === "claude_local";
 }
 
 export function otherSubscriptionAdapter(adapterType: SubscriptionAdapterType): SubscriptionAdapterType {
   return adapterType === "codex_local" ? "claude_local" : "codex_local";
+}
+
+/**
+ * Remove credentials and routing flags owned by either subscription provider.
+ *
+ * Cross-provider adapter config is sanitized before workspace/env resolution,
+ * but project, routine, environment, and secret bindings are merged later. A
+ * second pass over the fully resolved env prevents those later sources from
+ * reintroducing the primary provider's credentials into the fallback process.
+ */
+export function stripSubscriptionProviderSpecificEnv(value: unknown): Record<string, unknown> {
+  const sourceEnv = asRecord(value);
+  if (!sourceEnv) return {};
+  return Object.fromEntries(
+    Object.entries(sourceEnv).filter(([envKey]) =>
+      !PROVIDER_SPECIFIC_ENV_KEYS.has(envKey)
+      && !PROVIDER_SPECIFIC_ENV_PREFIXES.some((prefix) => envKey.startsWith(prefix))
+    ),
+  );
+}
+
+/**
+ * Apply the post-resolution env isolation pass only during a cross-provider
+ * run. Same-provider runs retain their established project/routine env
+ * semantics; the selected managed-account env is reapplied by the caller.
+ */
+export function sanitizeResolvedSubscriptionAdapterConfig(input: {
+  adapterConfig: Record<string, unknown>;
+  agentAdapterType: string;
+  effectiveAdapterType: string;
+}): Record<string, unknown> {
+  if (
+    !isSubscriptionAdapterType(input.agentAdapterType)
+    || !isSubscriptionAdapterType(input.effectiveAdapterType)
+    || input.agentAdapterType === input.effectiveAdapterType
+  ) {
+    return { ...input.adapterConfig };
+  }
+
+  const sanitized = { ...input.adapterConfig };
+  if (asRecord(input.adapterConfig.env)) {
+    sanitized.env = stripSubscriptionProviderSpecificEnv(input.adapterConfig.env);
+  }
+  return sanitized;
+}
+
+/**
+ * Override ambient credentials owned by the inactive subscription provider.
+ *
+ * Local adapters merge their config env over process.env. Deleting a primary
+ * provider key from adapterConfig is therefore insufficient during failover:
+ * the key can otherwise reappear from the Paperclip server environment. Empty
+ * overrides keep the effective provider's host environment available while
+ * preventing the inactive provider's credentials from reaching the child.
+ */
+export function resolveCrossProviderProcessEnvOverrides(input: {
+  processEnv: Record<string, string | undefined>;
+  agentAdapterType: string;
+  effectiveAdapterType: string;
+}): Record<string, string> {
+  if (
+    !isSubscriptionAdapterType(input.agentAdapterType)
+    || !isSubscriptionAdapterType(input.effectiveAdapterType)
+    || input.agentAdapterType === input.effectiveAdapterType
+  ) {
+    return {};
+  }
+
+  const inactiveProvider = otherSubscriptionAdapter(input.effectiveAdapterType);
+  const inactivePrefixes = PROVIDER_ENV_PREFIXES[inactiveProvider];
+  return Object.fromEntries(
+    Object.keys(input.processEnv)
+      .filter((envKey) => inactivePrefixes.some((prefix) => envKey.startsWith(prefix)))
+      .map((envKey) => [envKey, ""]),
+  );
+}
+
+/**
+ * Capacity is transient and may change independently for each provider. Drop
+ * the previous account reservation, and when failover is enabled also drop the
+ * provider pin so the retry evaluates the full configured order again. Quota
+ * deadlines remain in the nested failover metadata and continue to guide
+ * subsequent quota retries.
+ */
+export function resetSubscriptionProviderSelectionForCapacityRetry(
+  contextSnapshot: Record<string, unknown>,
+  hasFailoverPolicy: boolean,
+): Record<string, unknown> {
+  const next = { ...contextSnapshot };
+  delete next.paperclipCodexAccount;
+  delete next.paperclipClaudeAccount;
+  if (!hasFailoverPolicy) return next;
+
+  delete next.paperclipEffectiveAdapterType;
+  const existingFailoverMetadata = asRecord(next.paperclipSubscriptionFailover);
+  const failoverMetadata = existingFailoverMetadata ? { ...existingFailoverMetadata } : {};
+  delete failoverMetadata.effectiveAdapterType;
+  if (Object.keys(failoverMetadata).length > 0) {
+    next.paperclipSubscriptionFailover = failoverMetadata;
+  } else {
+    delete next.paperclipSubscriptionFailover;
+  }
+  return next;
 }
 
 export function defaultSubscriptionFailoverOrder(
@@ -64,48 +202,70 @@ function withFailoverModels(
   return models ? { ...config, models } : config;
 }
 
-/** Parse runtimeConfig.subscriptionFailover; invalid shapes use the safe default order. */
+/** Parse runtimeConfig.subscriptionFailover; invalid legacy shapes fail closed. */
 export function readSubscriptionFailoverConfig(runtimeConfig: unknown): SubscriptionFailoverConfig | null {
   const root = asRecord(runtimeConfig);
   const raw = asRecord(root?.subscriptionFailover);
   if (!raw || raw.enabled !== true) return null;
 
   const orderRaw = Array.isArray(raw.order) ? raw.order : null;
-  if (!orderRaw || orderRaw.length < 2) {
-    return withFailoverModels({
-      enabled: true,
-      order: defaultSubscriptionFailoverOrder("codex_local"),
-    }, raw);
-  }
+  if (!orderRaw || orderRaw.length !== 2) return null;
 
   const first = orderRaw[0];
   const second = orderRaw[1];
   if (!isSubscriptionAdapterType(first) || !isSubscriptionAdapterType(second) || first === second) {
-    return withFailoverModels({
-      enabled: true,
-      order: defaultSubscriptionFailoverOrder("codex_local"),
-    }, raw);
+    return null;
   }
   return withFailoverModels({ enabled: true, order: [first, second] }, raw);
 }
 
-export function modelForSubscriptionAdapter(
-  failover: SubscriptionFailoverConfig | null,
-  adapterType: string,
-  adapterConfig?: Record<string, unknown> | null,
-) {
-  if (isSubscriptionAdapterType(adapterType)) {
-    const configured = failover?.models?.[adapterType]?.trim();
-    if (configured) return configured;
+/**
+ * Build the adapter config for the provider that will actually execute.
+ *
+ * The agent's persisted adapterConfig belongs to agent.adapterType. Reusing
+ * provider-specific command/model flags across providers is unsafe, so a
+ * fallback provider receives only the shared execution fields plus its own
+ * optional model. Adapter defaults fill the remaining provider-specific
+ * values.
+ */
+export function resolveSubscriptionAdapterConfig(input: {
+  adapterConfig: Record<string, unknown>;
+  agentAdapterType: string;
+  effectiveAdapterType: string;
+  failover: SubscriptionFailoverConfig | null;
+}): Record<string, unknown> {
+  if (!input.failover || !isSubscriptionAdapterType(input.effectiveAdapterType)) {
+    return { ...input.adapterConfig };
   }
-  const fallback = adapterConfig?.model;
-  return typeof fallback === "string" && fallback.trim() ? fallback.trim() : null;
+
+  if (input.effectiveAdapterType === input.agentAdapterType) {
+    const primary = { ...input.adapterConfig };
+    const configuredModel = input.failover.models?.[input.effectiveAdapterType];
+    if (configuredModel) primary.model = configuredModel;
+    return primary;
+  }
+
+  const fallback: Record<string, unknown> = {};
+  for (const key of CROSS_PROVIDER_CONFIG_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(input.adapterConfig, key)) {
+      if (key !== "env") {
+        fallback[key] = input.adapterConfig[key];
+        continue;
+      }
+      if (!asRecord(input.adapterConfig.env)) continue;
+      fallback.env = stripSubscriptionProviderSpecificEnv(input.adapterConfig.env);
+    }
+  }
+  const configuredModel = input.failover.models?.[input.effectiveAdapterType];
+  if (configuredModel) fallback.model = configuredModel;
+  return fallback;
 }
 
 export function agentAllowsSubscriptionFailoverAssign(
   agent: { adapterType: string; runtimeConfig?: unknown },
   provider: SubscriptionAdapterType,
 ) {
+  if (!isSubscriptionAdapterType(agent.adapterType)) return false;
   if (agent.adapterType === provider) return true;
   const failover = readSubscriptionFailoverConfig(agent.runtimeConfig);
   return failover ? failover.order.includes(provider) : false;
@@ -116,10 +276,11 @@ export function resolveEffectiveSubscriptionAdapter(input: {
   runtimeConfig: unknown;
   contextSnapshot?: unknown;
 }): SubscriptionAdapterType | null {
+  if (!isSubscriptionAdapterType(input.agentAdapterType)) return null;
+  const failover = readSubscriptionFailoverConfig(input.runtimeConfig);
   const context = asRecord(input.contextSnapshot);
   const forced = context?.paperclipEffectiveAdapterType;
-  if (isSubscriptionAdapterType(forced)) return forced;
-  const failover = readSubscriptionFailoverConfig(input.runtimeConfig);
+  if (isSubscriptionAdapterType(forced) && failover?.order.includes(forced)) return forced;
   if (failover) return failover.order[0];
   return isSubscriptionAdapterType(input.agentAdapterType) ? input.agentAdapterType : null;
 }
@@ -176,9 +337,9 @@ export function resolveSubscriptionFailoverRetryTiming(input: {
   const currentRetryNotBeforeValue = quotaNotBeforeByProvider[input.currentAdapterType];
   const alternateRetryNotBeforeValue = quotaNotBeforeByProvider[alternateAdapter];
   const shouldStayOnCurrent = Boolean(
-    currentRetryNotBeforeValue &&
-    alternateRetryNotBeforeValue &&
-    new Date(currentRetryNotBeforeValue).getTime() <= new Date(alternateRetryNotBeforeValue).getTime(),
+    currentRetryNotBeforeValue
+    && alternateRetryNotBeforeValue
+    && new Date(currentRetryNotBeforeValue).getTime() <= new Date(alternateRetryNotBeforeValue).getTime(),
   );
   const selectedAdapter = shouldStayOnCurrent ? input.currentAdapterType : alternateAdapter;
   const switchesProvider = selectedAdapter !== input.currentAdapterType;
@@ -200,14 +361,17 @@ export function resolveSubscriptionFailoverRetryTiming(input: {
 export function withSubscriptionFailoverRetryContext(
   contextSnapshot: Record<string, unknown>,
   nextAdapter: SubscriptionAdapterType,
+  quotaNotBeforeByProvider?: Partial<Record<SubscriptionAdapterType, string>>,
 ): Record<string, unknown> {
+  const existing = asRecord(contextSnapshot.paperclipSubscriptionFailover);
   return {
     ...contextSnapshot,
     paperclipEffectiveAdapterType: nextAdapter,
     paperclipSubscriptionFailover: {
-      ...(asRecord(contextSnapshot.paperclipSubscriptionFailover) ?? {}),
+      ...existing,
       flippedAt: new Date().toISOString(),
       effectiveAdapterType: nextAdapter,
+      ...(quotaNotBeforeByProvider ? { quotaNotBeforeByProvider } : {}),
     },
     // Cross-provider resume is unsafe; force a fresh harness session.
     forceFreshSession: true,

@@ -21,6 +21,7 @@ import {
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { agentService } from "./agents.js";
 import { MANAGED_ACCOUNT_SESSION_LIMIT } from "./llm-capacity.js";
+import { agentAllowsSubscriptionFailoverAssign } from "./subscription-failover.js";
 
 const LOGIN_LIFETIME_MS = 15 * 60 * 1000;
 const ACCOUNT_HIGH_WATER_PERCENT = 95;
@@ -30,10 +31,15 @@ const URL_RE = /https:\/\/[^\s\u001b]+/i;
 const CLAUDE_SUBSCRIPTION_BLOCKING_ENV_KEYS = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_FOUNDRY_RESOURCE",
+  "ANTHROPIC_VERTEX_PROJECT_ID",
   "CLAUDE_CODE_OAUTH_TOKEN",
   "CLAUDE_CODE_USE_BEDROCK",
   "ANTHROPIC_BEDROCK_BASE_URL",
   "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+  "CLOUD_ML_REGION",
 ] as const;
 
 interface LoginSession {
@@ -50,7 +56,7 @@ interface LoginSession {
   expiryTimer: NodeJS.Timeout;
 }
 
-interface SelectableClaudeAccount {
+export interface SelectableClaudeAccount {
   id: string;
   companyId: string;
   name: string;
@@ -61,6 +67,34 @@ export interface FirstAvailableClaudeAccountSelection {
   accountName: string;
   claudeConfigDir: string;
   quotaState: "available" | "unknown" | "exhausted_fallback";
+}
+
+export type FirstAvailableClaudeAccountDiagnosticReason =
+  | "selected"
+  | "no_authenticated"
+  | "capacity_exhausted"
+  | "quota_exhausted";
+
+export interface FirstAvailableClaudeAccountDiagnostics {
+  selection: FirstAvailableClaudeAccountSelection | null;
+  reason: FirstAvailableClaudeAccountDiagnosticReason;
+  authenticatedCount: number;
+  withinSessionLimitCount: number;
+  availableQuotaCount: number;
+}
+
+export interface SelectFirstAvailableClaudeAccountInput {
+  accounts: SelectableClaudeAccount[];
+  busyAccountIds?: Iterable<string>;
+  preferAvailableOnly?: boolean;
+  readAuthStatus?: typeof readClaudeAuthStatus;
+  readQuota?: typeof getQuotaWindows;
+}
+
+export interface ResolveFirstAvailableClaudeAccountOptions {
+  excludeRunId?: string;
+  preferAvailableOnly?: boolean;
+  accountId?: string;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -91,6 +125,15 @@ function hasConfiguredProvider(adapterConfig: unknown): string | null {
   return null;
 }
 
+export function claudeSubscriptionAssignmentBlocker(input: {
+  adapterConfig: unknown;
+  assignmentMode: ClaudeAccountMode;
+  isPrimaryAdapter: boolean;
+}): string | null {
+  if (!input.isPrimaryAdapter || input.assignmentMode === "host") return null;
+  return hasConfiguredProvider(input.adapterConfig);
+}
+
 function resolveClaudeExecutable(): string {
   return process.env.PAPERCLIP_CLAUDE_EXECUTABLE?.trim() || "claude";
 }
@@ -102,6 +145,18 @@ export function resolveClaudeAccountConfigDir(companyId: string, accountId: stri
     env: process.env,
   });
   return path.resolve(instanceRoot, "companies", companyId, "claude-accounts", accountId, "claude-config");
+}
+
+/**
+ * Pin a managed claude.ai profile for a run and neutralize host/API provider
+ * flags that would otherwise override the selected subscription account.
+ */
+export function resolveClaudeManagedAccountRunEnv(configDir: string): Record<string, string> {
+  return {
+    CLAUDE_CONFIG_DIR: configDir,
+    CLAUDE_SECURESTORAGE_CONFIG_DIR: configDir,
+    ...Object.fromEntries(CLAUDE_SUBSCRIPTION_BLOCKING_ENV_KEYS.map((key) => [key, ""])),
+  };
 }
 
 function accountEnv(companyId: string, accountId: string): NodeJS.ProcessEnv {
@@ -225,12 +280,9 @@ export async function withClaudeAccountSelectionLock<T>(
   }
 }
 
-export async function selectFirstAvailableClaudeAccount(input: {
-  accounts: SelectableClaudeAccount[];
-  busyAccountIds?: Iterable<string>;
-  readAuthStatus?: typeof readClaudeAuthStatus;
-  readQuota?: typeof getQuotaWindows;
-}): Promise<FirstAvailableClaudeAccountSelection | null> {
+export async function selectFirstAvailableClaudeAccountWithDiagnostics(
+  input: SelectFirstAvailableClaudeAccountInput,
+): Promise<FirstAvailableClaudeAccountDiagnostics> {
   const readAuthStatus = input.readAuthStatus ?? readClaudeAuthStatus;
   const readQuota = input.readQuota ?? getQuotaWindows;
   const busy = new Map<string, number>();
@@ -269,7 +321,13 @@ export async function selectFirstAvailableClaudeAccount(input: {
   const withinSessionLimit = candidates.filter(
     (candidate) => candidate.activeRuns < MANAGED_ACCOUNT_SESSION_LIMIT,
   );
-  withinSessionLimit.sort((left, right) => {
+  const ranked = input.preferAvailableOnly
+    ? withinSessionLimit.filter((candidate) => candidate.quotaState === "available")
+    : withinSessionLimit;
+  const availableQuotaCount = withinSessionLimit.filter(
+    (candidate) => candidate.quotaState === "available",
+  ).length;
+  ranked.sort((left, right) => {
     const rankDelta = rank[left.quotaState] - rank[right.quotaState];
     if (rankDelta) return rankDelta;
     const leftPressure = (left.usedPercent ?? 100) + left.activeRuns * ACTIVE_RUN_PRESSURE_PERCENT;
@@ -277,24 +335,47 @@ export async function selectFirstAvailableClaudeAccount(input: {
     if (leftPressure !== rightPressure) return leftPressure - rightPressure;
     return left.activeRuns - right.activeRuns;
   });
-  const selected = withinSessionLimit[0];
-  return selected ? {
+  const selected = ranked[0];
+  const selection = selected ? {
     accountId: selected.accountId,
     accountName: selected.accountName,
     claudeConfigDir: selected.claudeConfigDir,
     quotaState: selected.quotaState,
   } : null;
+  const reason: FirstAvailableClaudeAccountDiagnosticReason = selection
+    ? "selected"
+    : candidates.length === 0
+      ? "no_authenticated"
+      : withinSessionLimit.length === 0
+        ? "capacity_exhausted"
+        : "quota_exhausted";
+  return {
+    selection,
+    reason,
+    authenticatedCount: candidates.length,
+    withinSessionLimitCount: withinSessionLimit.length,
+    availableQuotaCount,
+  };
 }
 
-export async function resolveFirstAvailableClaudeAccount(
+export async function selectFirstAvailableClaudeAccount(
+  input: SelectFirstAvailableClaudeAccountInput,
+): Promise<FirstAvailableClaudeAccountSelection | null> {
+  return (await selectFirstAvailableClaudeAccountWithDiagnostics(input)).selection;
+}
+
+export async function resolveFirstAvailableClaudeAccountWithDiagnostics(
   db: Db,
   companyId: string,
-  opts?: { excludeRunId?: string },
-): Promise<FirstAvailableClaudeAccountSelection | null> {
+  opts?: ResolveFirstAvailableClaudeAccountOptions,
+): Promise<FirstAvailableClaudeAccountDiagnostics> {
   const [accountRows, busyRows] = await Promise.all([
     db.select({ id: claudeAccounts.id, companyId: claudeAccounts.companyId, name: claudeAccounts.name })
       .from(claudeAccounts)
-      .where(eq(claudeAccounts.companyId, companyId))
+      .where(and(
+        eq(claudeAccounts.companyId, companyId),
+        ...(opts?.accountId ? [eq(claudeAccounts.id, opts.accountId)] : []),
+      ))
       .orderBy(asc(claudeAccounts.createdAt)),
     db.select({
       id: heartbeatRuns.id,
@@ -304,10 +385,19 @@ export async function resolveFirstAvailableClaudeAccount(
       .from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.status, "running"))),
   ]);
-  return selectFirstAvailableClaudeAccount({
+  return selectFirstAvailableClaudeAccountWithDiagnostics({
     accounts: accountRows,
+    preferAvailableOnly: opts?.preferAvailableOnly,
     busyAccountIds: claudeBusyAccountIdsFromRuns(busyRows, opts?.excludeRunId),
   });
+}
+
+export async function resolveFirstAvailableClaudeAccount(
+  db: Db,
+  companyId: string,
+  opts?: ResolveFirstAvailableClaudeAccountOptions,
+): Promise<FirstAvailableClaudeAccountSelection | null> {
+  return (await resolveFirstAvailableClaudeAccountWithDiagnostics(db, companyId, opts)).selection;
 }
 
 async function loadQuota(env: NodeJS.ProcessEnv, authenticated: boolean): Promise<ClaudeAccountQuota> {
@@ -362,15 +452,20 @@ export function claudeAccountService(db: Db) {
           id: agents.id,
           name: agents.name,
           status: agents.status,
+          adapterType: agents.adapterType,
+          runtimeConfig: agents.runtimeConfig,
           claudeAccountMode: agents.claudeAccountMode,
           claudeAccountId: agents.claudeAccountId,
           adapterConfig: agents.adapterConfig,
         }).from(agents).where(and(
           eq(agents.companyId, companyId),
-          eq(agents.adapterType, "claude_local"),
           ne(agents.status, "terminated"),
         )).orderBy(asc(agents.name)),
       ]);
+
+      const claudeAgentRows = agentRows.filter((agent) =>
+        agentAllowsSubscriptionFailoverAssign(agent, "claude_local"),
+      );
 
       const accounts = await Promise.all(accountRows.map(async (account) => {
         const env = accountEnv(companyId, account.id);
@@ -386,7 +481,7 @@ export function claudeAccountService(db: Db) {
           authMethod: auth?.authMethod ?? null,
           planType: auth?.subscriptionType ?? null,
           lastAuthenticatedAt: account.lastAuthenticatedAt?.toISOString() ?? null,
-          assignedAgentIds: agentRows.filter((agent) => agent.claudeAccountId === account.id).map((agent) => agent.id),
+          assignedAgentIds: claudeAgentRows.filter((agent) => agent.claudeAccountId === account.id).map((agent) => agent.id),
           quota: await loadQuota(env, authenticated),
           login,
           createdAt: account.createdAt.toISOString(),
@@ -396,8 +491,10 @@ export function claudeAccountService(db: Db) {
 
       return {
         accounts,
-        agents: agentRows.map((agent) => {
-          const blocker = hasConfiguredProvider(agent.adapterConfig);
+        agents: claudeAgentRows.map((agent) => {
+          const blocker = agent.adapterType === "claude_local"
+            ? hasConfiguredProvider(agent.adapterConfig)
+            : null;
           return {
             id: agent.id,
             name: agent.name,
@@ -572,15 +669,20 @@ export function claudeAccountService(db: Db) {
     ) => {
       const agent = await agentsSvc.getById(agentId);
       if (!agent || agent.companyId !== companyId) throw notFound("Agent not found");
-      if (agent.adapterType !== "claude_local") {
-        throw unprocessable("Only Claude agents can be assigned to a Claude account");
+      if (!agentAllowsSubscriptionFailoverAssign(agent, "claude_local")) {
+        throw unprocessable("Only Claude agents (or agents with Codex↔Claude failover) can be assigned to a Claude account");
       }
-      const blocker = hasConfiguredProvider(agent.adapterConfig);
+      const isPrimaryAdapter = agent.adapterType === "claude_local";
+      const blocker = claudeSubscriptionAssignmentBlocker({
+        adapterConfig: agent.adapterConfig,
+        assignmentMode: assignment.mode,
+        isPrimaryAdapter,
+      });
       if (blocker) throw conflict(`Remove ${blocker} from this agent before assigning a Claude subscription account`);
 
       const adapterConfig = { ...agent.adapterConfig };
       const env = { ...(asRecord(adapterConfig.env) ?? {}) };
-      if (agent.claudeAccountId) {
+      if (isPrimaryAdapter && agent.claudeAccountId) {
         const oldDir = resolveClaudeAccountConfigDir(companyId, agent.claudeAccountId);
         if (readPlainEnvValue(env.CLAUDE_CONFIG_DIR) === oldDir) delete env.CLAUDE_CONFIG_DIR;
         if (readPlainEnvValue(env.CLAUDE_SECURESTORAGE_CONFIG_DIR) === oldDir) delete env.CLAUDE_SECURESTORAGE_CONFIG_DIR;
@@ -596,8 +698,10 @@ export function claudeAccountService(db: Db) {
           throw conflict("Authenticate this Claude account before assigning agents to it");
         }
         const configDir = resolveClaudeAccountConfigDir(companyId, accountId);
-        env.CLAUDE_CONFIG_DIR = configDir;
-        env.CLAUDE_SECURESTORAGE_CONFIG_DIR = configDir;
+        if (isPrimaryAdapter) {
+          env.CLAUDE_CONFIG_DIR = configDir;
+          env.CLAUDE_SECURESTORAGE_CONFIG_DIR = configDir;
+        }
       } else if (assignment.mode === "first_available") {
         const rows = await db.select({ id: claudeAccounts.id }).from(claudeAccounts)
           .where(eq(claudeAccounts.companyId, companyId));
@@ -607,14 +711,14 @@ export function claudeAccountService(db: Db) {
         }
         if (!authenticated) throw conflict("Authenticate at least one Claude account before enabling automatic selection");
       }
-      if (assignment.mode !== "host") {
+      if (isPrimaryAdapter && assignment.mode !== "host") {
         for (const key of CLAUDE_SUBSCRIPTION_BLOCKING_ENV_KEYS) env[key] = "";
       }
-      adapterConfig.env = env;
+      if (isPrimaryAdapter) adapterConfig.env = env;
       const updated = await agentsSvc.update(agentId, {
         claudeAccountMode: assignment.mode,
         claudeAccountId: accountId,
-        adapterConfig,
+        ...(isPrimaryAdapter ? { adapterConfig } : {}),
       }, {
         recordRevision: {
           createdByAgentId: actor.agentId ?? null,

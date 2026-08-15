@@ -4,6 +4,7 @@ export { healthApi } from "./health";
 export { accessApi } from "./access";
 export { companiesApi } from "./companies";
 export { agentsApi } from "./agents";
+export { agentAssignmentsApi } from "./agentAssignments";
 export { projectsApi } from "./projects";
 export { issuesApi } from "./issues";
 export { externalObjectsApi } from "./externalObjects";

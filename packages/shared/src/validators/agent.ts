@@ -62,10 +62,25 @@ const agentModelProfileConfigSchema = z.object({
   adapterConfig: adapterConfigSchema,
 }).strict();
 
+export const agentSubscriptionProviderSchema = z.enum(["codex_local", "claude_local"]);
+
+export const agentSubscriptionFailoverSchema = z.object({
+  enabled: z.boolean(),
+  order: z.union([
+    z.tuple([z.literal("codex_local"), z.literal("claude_local")]),
+    z.tuple([z.literal("claude_local"), z.literal("codex_local")]),
+  ]),
+  models: z.object({
+    codex_local: z.string().trim().min(1).optional(),
+    claude_local: z.string().trim().min(1).optional(),
+  }).strict().optional(),
+}).strict();
+
 export const agentRuntimeConfigSchema = z.object({
   modelProfiles: z.object({
     cheap: agentModelProfileConfigSchema.optional(),
   }).strict().optional(),
+  subscriptionFailover: agentSubscriptionFailoverSchema.optional(),
 }).catchall(z.unknown());
 
 export const createAgentSchema = z.object({

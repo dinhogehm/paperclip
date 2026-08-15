@@ -161,7 +161,7 @@ Invariant: every business record belongs to exactly one company.
 - `codex_account_mode` text not null default `host`; `host`, `fixed`, or quota-aware `first_available`
 - `codex_account_id` uuid fk `codex_accounts.id` null; selects an isolated company-managed ChatGPT subscription profile for `codex_local` agents
 - `adapter_config` jsonb not null
-- `runtime_config` jsonb not null default `{}`; may include Paperclip runtime policy such as `modelProfiles.cheap.adapterConfig` for an optional low-cost model lane that does not change the primary adapter config
+- `runtime_config` jsonb not null default `{}`; may include Paperclip runtime policy such as `modelProfiles.cheap.adapterConfig` for an optional low-cost model lane that does not change the primary adapter config, plus `subscriptionFailover` with `enabled`, an ordered Codex/Claude pair, and optional provider-specific models
 - `default_environment_id` uuid fk `environments.id` null
 - `context_mode` enum: `thin | fat` default `thin`
 - `budget_monthly_cents` int not null default 0
@@ -180,6 +180,8 @@ Invariants:
 - `first_available` serializes concurrent run-boundary reservations, resolves an authenticated company account for each run, skips profiles whose reported quota windows are exhausted, and prefers profiles not already used by another queued or running heartbeat
 - a selected Claude account must belong to the same company and cannot be combined with explicit Anthropic API, OAuth token, Bedrock, or Vertex bindings
 - Claude `first_available` uses isolated `CLAUDE_CONFIG_DIR` profiles and applies the same serialized, quota-aware reservation rules at each run boundary
+- an agent may retain both Codex and Claude account assignments when subscription failover is enabled; its ordered provider pair determines the primary and fallback without clearing the other assignment
+- each heartbeat run has exactly one effective subscription provider; switching providers for a retry forces a fresh adapter session, and provider-specific model or command configuration must not leak across the provider boundary
 
 ## 7.2.1 `codex_accounts`
 

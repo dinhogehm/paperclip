@@ -265,6 +265,8 @@ export type {
   AgentDetail,
   ClearAgentErrorResponse,
   AgentModelProfileConfig,
+  AgentSubscriptionProvider,
+  AgentSubscriptionFailoverConfig,
   AgentPermissions,
   AgentRuntimeConfig,
   AgentInstructionsBundleMode,
