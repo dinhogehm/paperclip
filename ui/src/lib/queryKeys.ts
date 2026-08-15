@@ -11,6 +11,9 @@ export const queryKeys = {
   claudeAccounts: {
     list: (companyId: string) => ["claude-accounts", companyId] as const,
   },
+  agentAssignments: {
+    list: (companyId: string) => ["agent-assignments", companyId] as const,
+  },
   apps: {
     gallery: (companyId: string) => ["apps", companyId, "gallery"] as const,
     attention: (companyId: string) => ["apps", companyId, "attention"] as const,

@@ -333,6 +333,8 @@ export {
   createAgentHireSchema,
   updateAgentSchema,
   agentRuntimeConfigSchema,
+  agentSubscriptionProviderSchema,
+  agentSubscriptionFailoverSchema,
   agentInstructionsBundleModeSchema,
   updateAgentInstructionsBundleSchema,
   upsertAgentInstructionsFileSchema,

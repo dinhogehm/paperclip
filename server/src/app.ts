@@ -22,6 +22,7 @@ import { cloudRoutes } from "./routes/cloud.js";
 import { companyRoutes } from "./routes/companies.js";
 import { codexAccountRoutes } from "./routes/codex-accounts.js";
 import { claudeAccountRoutes } from "./routes/claude-accounts.js";
+import { agentAssignmentRoutes } from "./routes/agent-assignments.js";
 import { companySkillRoutes } from "./routes/company-skills.js";
 import { companySkillPolicyRoutes } from "./routes/company-skill-policy.js";
 import { inboxAgentPolicyRoutes } from "./routes/inbox-agent-policy.js";
@@ -382,6 +383,7 @@ export async function createApp(
   api.use("/companies", companyRoutes(db, opts.storageService));
   api.use(codexAccountRoutes(db));
   api.use(claudeAccountRoutes(db));
+  api.use(agentAssignmentRoutes(db));
   api.use(llmRoutes(db));
   api.use(folderRoutes(db));
   api.use(companySkillRoutes(db));

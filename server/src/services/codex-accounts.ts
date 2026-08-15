@@ -22,6 +22,7 @@ import {
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { agentService } from "./agents.js";
 import { MANAGED_ACCOUNT_SESSION_LIMIT } from "./llm-capacity.js";
+import { agentAllowsSubscriptionFailoverAssign } from "./subscription-failover.js";
 
 const LOGIN_LIFETIME_MS = 15 * 60 * 1000;
 const LOGIN_PROMPT_WAIT_MS = 15_000;
@@ -76,6 +77,16 @@ function hasConfiguredApiKey(adapterConfig: unknown): boolean {
   if (readPlainEnvValue(value)) return true;
   const binding = asRecord(value);
   return binding?.type === "secret_ref" && typeof binding.secretId === "string";
+}
+
+export function shouldBlockCodexSubscriptionAssignment(input: {
+  adapterConfig: unknown;
+  assignmentMode: CodexAccountMode;
+  isPrimaryAdapter: boolean;
+}): boolean {
+  return input.isPrimaryAdapter
+    && input.assignmentMode !== "host"
+    && hasConfiguredApiKey(input.adapterConfig);
 }
 
 function publicLoginState(session: LoginSession | undefined): CodexAccountLoginState {
@@ -169,7 +180,19 @@ export function resolveCodexAccountHome(companyId: string, accountId: string): s
   );
 }
 
-interface AutoSelectableCodexAccount {
+/**
+ * Pin a managed ChatGPT profile for a run and prevent ambient API credentials
+ * from silently changing the biller away from that subscription account.
+ */
+export function resolveCodexManagedAccountRunEnv(codexHome: string): Record<string, string> {
+  return {
+    CODEX_HOME: codexHome,
+    OPENAI_API_KEY: "",
+    OPENAI_BASE_URL: "",
+  };
+}
+
+export interface AutoSelectableCodexAccount {
   id: string;
   companyId: string;
   name: string;
@@ -180,6 +203,34 @@ export interface FirstAvailableCodexAccountSelection {
   accountName: string;
   codexHome: string;
   quotaState: "available" | "unknown" | "exhausted_fallback";
+}
+
+export type FirstAvailableCodexAccountDiagnosticReason =
+  | "selected"
+  | "no_authenticated"
+  | "capacity_exhausted"
+  | "quota_exhausted";
+
+export interface FirstAvailableCodexAccountDiagnostics {
+  selection: FirstAvailableCodexAccountSelection | null;
+  reason: FirstAvailableCodexAccountDiagnosticReason;
+  authenticatedCount: number;
+  withinSessionLimitCount: number;
+  availableQuotaCount: number;
+}
+
+export interface SelectFirstAvailableCodexAccountInput {
+  accounts: AutoSelectableCodexAccount[];
+  busyAccountIds?: Iterable<string>;
+  preferAvailableOnly?: boolean;
+  readAuthInfo?: typeof readCodexAuthInfo;
+  fetchQuota?: typeof fetchCodexQuota;
+}
+
+export interface ResolveFirstAvailableCodexAccountOptions {
+  excludeRunId?: string;
+  preferAvailableOnly?: boolean;
+  accountId?: string;
 }
 
 export function codexAccountIdFromRunContext(value: unknown): string | null {
@@ -235,12 +286,9 @@ export async function withCodexAccountSelectionLock<T>(
   }
 }
 
-export async function selectFirstAvailableCodexAccount(input: {
-  accounts: AutoSelectableCodexAccount[];
-  busyAccountIds?: Iterable<string>;
-  readAuthInfo?: typeof readCodexAuthInfo;
-  fetchQuota?: typeof fetchCodexQuota;
-}): Promise<FirstAvailableCodexAccountSelection | null> {
+export async function selectFirstAvailableCodexAccountWithDiagnostics(
+  input: SelectFirstAvailableCodexAccountInput,
+): Promise<FirstAvailableCodexAccountDiagnostics> {
   const readAuthInfo = input.readAuthInfo ?? readCodexAuthInfo;
   const fetchQuota = input.fetchQuota ?? fetchCodexQuota;
   const busyAccountCounts = new Map<string, number>();
@@ -298,7 +346,13 @@ export async function selectFirstAvailableCodexAccount(input: {
   const withinSessionLimit = selections.filter(
     (selection) => selection.activeRuns < MANAGED_ACCOUNT_SESSION_LIMIT,
   );
-  withinSessionLimit.sort((left, right) => {
+  const ranked = input.preferAvailableOnly
+    ? withinSessionLimit.filter((selection) => selection.quotaState === "available")
+    : withinSessionLimit;
+  const availableQuotaCount = withinSessionLimit.filter(
+    (selection) => selection.quotaState === "available",
+  ).length;
+  ranked.sort((left, right) => {
     const exhaustedDelta = Number(left.quotaState === "exhausted_fallback")
       - Number(right.quotaState === "exhausted_fallback");
     if (exhaustedDelta !== 0) return exhaustedDelta;
@@ -311,8 +365,8 @@ export async function selectFirstAvailableCodexAccount(input: {
     if (leftPressure !== rightPressure) return leftPressure - rightPressure;
     return left.activeRuns - right.activeRuns;
   });
-  const selection = withinSessionLimit[0];
-  return selection
+  const selection = ranked[0];
+  const publicSelection = selection
     ? {
         accountId: selection.accountId,
         accountName: selection.accountName,
@@ -320,13 +374,33 @@ export async function selectFirstAvailableCodexAccount(input: {
         quotaState: selection.quotaState,
       }
     : null;
+  const reason: FirstAvailableCodexAccountDiagnosticReason = publicSelection
+    ? "selected"
+    : selections.length === 0
+      ? "no_authenticated"
+      : withinSessionLimit.length === 0
+        ? "capacity_exhausted"
+        : "quota_exhausted";
+  return {
+    selection: publicSelection,
+    reason,
+    authenticatedCount: selections.length,
+    withinSessionLimitCount: withinSessionLimit.length,
+    availableQuotaCount,
+  };
 }
 
-export async function resolveFirstAvailableCodexAccount(
+export async function selectFirstAvailableCodexAccount(
+  input: SelectFirstAvailableCodexAccountInput,
+): Promise<FirstAvailableCodexAccountSelection | null> {
+  return (await selectFirstAvailableCodexAccountWithDiagnostics(input)).selection;
+}
+
+export async function resolveFirstAvailableCodexAccountWithDiagnostics(
   db: Db,
   companyId: string,
-  opts?: { excludeRunId?: string },
-): Promise<FirstAvailableCodexAccountSelection | null> {
+  opts?: ResolveFirstAvailableCodexAccountOptions,
+): Promise<FirstAvailableCodexAccountDiagnostics> {
   const [accountRows, busyRows] = await Promise.all([
     db
       .select({
@@ -335,7 +409,10 @@ export async function resolveFirstAvailableCodexAccount(
         name: codexAccounts.name,
       })
       .from(codexAccounts)
-      .where(eq(codexAccounts.companyId, companyId))
+      .where(and(
+        eq(codexAccounts.companyId, companyId),
+        ...(opts?.accountId ? [eq(codexAccounts.id, opts.accountId)] : []),
+      ))
       .orderBy(asc(codexAccounts.createdAt)),
     db
       .select({
@@ -349,14 +426,23 @@ export async function resolveFirstAvailableCodexAccount(
         eq(heartbeatRuns.status, "running"),
       )),
   ]);
-  return selectFirstAvailableCodexAccount({
+  return selectFirstAvailableCodexAccountWithDiagnostics({
     accounts: accountRows,
+    preferAvailableOnly: opts?.preferAvailableOnly,
     // Parse through the ORM value instead of extracting through a raw JSON SQL
     // expression. Some embedded-postgres/driver combinations return this
     // column serialized; the SQL path then yielded no reservations and every
     // worker fell back to the first account.
     busyAccountIds: codexBusyAccountIdsFromRuns(busyRows, opts?.excludeRunId),
   });
+}
+
+export async function resolveFirstAvailableCodexAccount(
+  db: Db,
+  companyId: string,
+  opts?: ResolveFirstAvailableCodexAccountOptions,
+): Promise<FirstAvailableCodexAccountSelection | null> {
+  return (await resolveFirstAvailableCodexAccountWithDiagnostics(db, companyId, opts)).selection;
 }
 
 type CodexQuotaFetcher = (
@@ -522,6 +608,8 @@ export function codexAccountService(db: Db) {
             id: agents.id,
             name: agents.name,
             status: agents.status,
+            adapterType: agents.adapterType,
+            runtimeConfig: agents.runtimeConfig,
             codexAccountMode: agents.codexAccountMode,
             codexAccountId: agents.codexAccountId,
             adapterConfig: agents.adapterConfig,
@@ -529,11 +617,14 @@ export function codexAccountService(db: Db) {
           .from(agents)
           .where(and(
             eq(agents.companyId, companyId),
-            eq(agents.adapterType, "codex_local"),
             ne(agents.status, "terminated"),
           ))
           .orderBy(asc(agents.name)),
       ]);
+
+      const codexAgentRows = agentRows.filter((agent) =>
+        agentAllowsSubscriptionFailoverAssign(agent, "codex_local"),
+      );
 
       const accountSummaries = await Promise.all(accountRows.map(async (account) => {
         const auth = await readCodexAuthInfo(resolveCodexAccountHome(companyId, account.id));
@@ -553,7 +644,7 @@ export function codexAccountService(db: Db) {
           planType: auth?.planType ?? null,
           lastRefresh: auth?.lastRefresh ?? null,
           lastAuthenticatedAt: account.lastAuthenticatedAt?.toISOString() ?? null,
-          assignedAgentIds: agentRows
+          assignedAgentIds: codexAgentRows
             .filter((agent) => agent.codexAccountId === account.id)
             .map((agent) => agent.id),
           quota,
@@ -565,8 +656,9 @@ export function codexAccountService(db: Db) {
 
       return {
         accounts: accountSummaries,
-        agents: agentRows.map((agent) => {
-          const apiKeyConfigured = hasConfiguredApiKey(agent.adapterConfig);
+        agents: codexAgentRows.map((agent) => {
+          const apiKeyConfigured = agent.adapterType === "codex_local"
+            && hasConfiguredApiKey(agent.adapterConfig);
           return {
             id: agent.id,
             name: agent.name,
@@ -686,16 +778,21 @@ export function codexAccountService(db: Db) {
     ) => {
       const agent = await agentsSvc.getById(agentId);
       if (!agent || agent.companyId !== companyId) throw notFound("Agent not found");
-      if (agent.adapterType !== "codex_local") {
-        throw unprocessable("Only Codex agents can be assigned to a Codex account");
+      if (!agentAllowsSubscriptionFailoverAssign(agent, "codex_local")) {
+        throw unprocessable("Only Codex agents (or agents with Codex↔Claude failover) can be assigned to a Codex account");
       }
-      if (hasConfiguredApiKey(agent.adapterConfig)) {
+      const isPrimaryAdapter = agent.adapterType === "codex_local";
+      if (shouldBlockCodexSubscriptionAssignment({
+        adapterConfig: agent.adapterConfig,
+        assignmentMode: assignment.mode,
+        isPrimaryAdapter,
+      })) {
         throw conflict("Remove OPENAI_API_KEY from this agent before assigning a ChatGPT account");
       }
 
       const adapterConfig = { ...agent.adapterConfig };
       const env = { ...(asRecord(adapterConfig.env) ?? {}) };
-      if (agent.codexAccountId) {
+      if (isPrimaryAdapter && agent.codexAccountId) {
         const assignedHome = resolveCodexAccountHome(companyId, agent.codexAccountId);
         if (readPlainEnvValue(env.CODEX_HOME) === assignedHome) delete env.CODEX_HOME;
       }
@@ -708,7 +805,7 @@ export function codexAccountService(db: Db) {
         if (!(await codexHomeHasUsableAuth(home))) {
           throw conflict("Authenticate this Codex account before assigning agents to it");
         }
-        env.CODEX_HOME = home;
+        if (isPrimaryAdapter) env.CODEX_HOME = home;
       } else if (assignment.mode === "first_available") {
         const accountRows = await db
           .select({ id: codexAccounts.id })
@@ -726,14 +823,14 @@ export function codexAccountService(db: Db) {
           throw conflict("Authenticate at least one Codex account before enabling automatic selection");
         }
       }
-      adapterConfig.env = env;
+      if (isPrimaryAdapter) adapterConfig.env = env;
 
       const updated = await agentsSvc.update(
         agentId,
         {
           codexAccountMode: assignment.mode,
           codexAccountId: accountId,
-          adapterConfig,
+          ...(isPrimaryAdapter ? { adapterConfig } : {}),
         },
         {
           recordRevision: {

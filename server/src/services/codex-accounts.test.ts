@@ -4,7 +4,10 @@ import {
   loadCodexAccountQuota,
   parseCodexDevicePrompt,
   resolveCodexLoginCommand,
+  resolveCodexManagedAccountRunEnv,
   selectFirstAvailableCodexAccount,
+  selectFirstAvailableCodexAccountWithDiagnostics,
+  shouldBlockCodexSubscriptionAssignment,
   withCodexAccountSelectionLock,
 } from "./codex-accounts.js";
 
@@ -29,6 +32,97 @@ function quotaWindow(usedPercent: number) {
 }
 
 describe("Codex account device login", () => {
+  it("diagnoses authentication, capacity, and quota exhaustion", async () => {
+    const account = { id: "account-1", companyId: "company-1", name: "Primary" };
+    const unauthenticated = await selectFirstAvailableCodexAccountWithDiagnostics({
+      accounts: [account],
+      readAuthInfo: async () => null,
+    });
+    expect(unauthenticated).toEqual({
+      selection: null,
+      reason: "no_authenticated",
+      authenticatedCount: 0,
+      withinSessionLimitCount: 0,
+      availableQuotaCount: 0,
+    });
+
+    const atCapacity = await selectFirstAvailableCodexAccountWithDiagnostics({
+      accounts: [account],
+      busyAccountIds: [account.id, account.id],
+      readAuthInfo: async () => authenticated,
+      fetchQuota: async () => [quotaWindow(20)],
+    });
+    expect(atCapacity).toEqual({
+      selection: null,
+      reason: "capacity_exhausted",
+      authenticatedCount: 1,
+      withinSessionLimitCount: 0,
+      availableQuotaCount: 0,
+    });
+
+    const quotaExhausted = await selectFirstAvailableCodexAccountWithDiagnostics({
+      accounts: [account],
+      preferAvailableOnly: true,
+      readAuthInfo: async () => authenticated,
+      fetchQuota: async () => [quotaWindow(96)],
+    });
+    expect(quotaExhausted).toEqual({
+      selection: null,
+      reason: "quota_exhausted",
+      authenticatedCount: 1,
+      withinSessionLimitCount: 1,
+      availableQuotaCount: 0,
+    });
+  });
+
+  it("reports eligible account counts alongside a successful selection", async () => {
+    const result = await selectFirstAvailableCodexAccountWithDiagnostics({
+      accounts: [
+        { id: "account-1", companyId: "company-1", name: "Primary" },
+        { id: "account-2", companyId: "company-1", name: "Secondary" },
+      ],
+      preferAvailableOnly: true,
+      readAuthInfo: async () => authenticated,
+      fetchQuota: async () => [quotaWindow(20)],
+    });
+
+    expect(result).toMatchObject({
+      reason: "selected",
+      authenticatedCount: 2,
+      withinSessionLimitCount: 2,
+      availableQuotaCount: 2,
+      selection: { accountId: "account-1" },
+    });
+  });
+
+  it("pins managed ChatGPT auth ahead of ambient API credentials", () => {
+    expect(resolveCodexManagedAccountRunEnv("/profiles/codex-1")).toEqual({
+      CODEX_HOME: "/profiles/codex-1",
+      OPENAI_API_KEY: "",
+      OPENAI_BASE_URL: "",
+    });
+  });
+
+  it("allows host mode with an API key but keeps managed modes fail-closed", () => {
+    const adapterConfig = { env: { OPENAI_API_KEY: { type: "secret_ref", secretId: "secret-1" } } };
+
+    expect(shouldBlockCodexSubscriptionAssignment({
+      adapterConfig,
+      assignmentMode: "host",
+      isPrimaryAdapter: true,
+    })).toBe(false);
+    expect(shouldBlockCodexSubscriptionAssignment({
+      adapterConfig,
+      assignmentMode: "fixed",
+      isPrimaryAdapter: true,
+    })).toBe(true);
+    expect(shouldBlockCodexSubscriptionAssignment({
+      adapterConfig,
+      assignmentMode: "first_available",
+      isPrimaryAdapter: true,
+    })).toBe(true);
+  });
+
   it("reads live account reservations from object and serialized run contexts", () => {
     const context = {
       paperclipCodexAccount: {
@@ -290,5 +384,15 @@ describe("Codex account device login", () => {
       error: "Usage data is temporarily unavailable. Paperclip will try again automatically.",
     });
     expect(JSON.stringify(quota)).not.toContain("sensitive diagnostics");
+  });
+
+  it("returns null with preferAvailableOnly when only exhausted accounts exist", async () => {
+    const selection = await selectFirstAvailableCodexAccount({
+      accounts: [{ id: "account-1", companyId: "company-1", name: "Exhausted" }],
+      preferAvailableOnly: true,
+      readAuthInfo: async () => authenticated,
+      fetchQuota: async () => [quotaWindow(96)],
+    });
+    expect(selection).toBeNull();
   });
 });

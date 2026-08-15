@@ -9,6 +9,7 @@ import {
   resolveModelProfileApplication,
   isConfigurationIncompleteFailedRun,
 } from "../services/heartbeat.ts";
+import { resolveSubscriptionAdapterConfig } from "../services/subscription-failover.ts";
 
 const cheapProfile: AdapterModelProfileDefinition = {
   key: "cheap",
@@ -105,6 +106,47 @@ describe("heartbeat model profile application", () => {
         model: "agent-cheap",
         modelReasoningEffort: "low",
       },
+    });
+  });
+
+  it("sanitizes primary runtime profile config before applying it to a fallback provider", () => {
+    const modelProfile = resolveModelProfileApplication({
+      adapterModelProfiles: [cheapProfile],
+      agentRuntimeConfig: {
+        modelProfiles: {
+          cheap: {
+            adapterConfig: {
+              command: "custom-codex",
+              model: "gpt-primary-profile",
+              extraArgs: ["--codex-only"],
+              cwd: "/workspace",
+              env: {
+                OPENAI_API_KEY: "must-not-cross",
+                GH_TOKEN: "shared-github-token",
+              },
+            },
+          },
+        },
+      },
+      issueModelProfile: "cheap",
+      contextSnapshot: {},
+      transformRuntimeAdapterConfig: (adapterConfig) => resolveSubscriptionAdapterConfig({
+        adapterConfig,
+        agentAdapterType: "codex_local",
+        effectiveAdapterType: "claude_local",
+        failover: {
+          enabled: true,
+          order: ["codex_local", "claude_local"],
+          models: { claude_local: "claude-fallback" },
+        },
+      }),
+    });
+
+    expect(modelProfile.adapterConfig).toEqual({
+      model: "claude-fallback",
+      modelReasoningEffort: "low",
+      cwd: "/workspace",
+      env: { GH_TOKEN: "shared-github-token" },
     });
   });
 

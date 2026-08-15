@@ -460,6 +460,18 @@ of replacing it with the shared host config. Explicit API key, OAuth token,
 Bedrock, or Vertex bindings must be removed before a Claude subscription
 profile can be assigned.
 
+Company Settings → Agent assignments can configure an agent with either one
+subscription provider or an ordered Codex + Claude failover pair. Each provider
+keeps its own account mode and fixed account (when applicable), and the order
+determines which provider is attempted first. A heartbeat run executes with
+exactly one effective provider. If quota requires a cross-provider retry,
+Paperclip starts a fresh adapter session for the fallback instead of reusing the
+other provider's conversation state. Provider-specific command arguments and
+model settings are not copied across that boundary; optional
+`runtimeConfig.subscriptionFailover.models` entries configure the model for
+each provider independently. Shared workspace, prompt, environment, sandbox,
+network, and timeout settings remain available to the fallback run.
+
 Paperclip also persists an empty `OPENAI_API_KEY` override for those agents so a host-level `OPENAI_API_KEY` cannot leak into Codex runs through process inheritance. If an operator explicitly configures `adapterConfig.env.CODEX_HOME`, it must not point at the shared company `codex-home`, `$CODEX_HOME`, or `~/.codex`.
 
 If the `codex` CLI is not installed or not on `PATH`, `codex_local` agent runs fail at execution time with a clear adapter error. Quota polling uses a short-lived `codex app-server` subprocess: when `codex` cannot be spawned, that provider reports `ok: false` in aggregated quota results and the API server keeps running (it must not exit on a missing binary).
