@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { and, eq } from "drizzle-orm";
 import {
+  activityLog,
   agents,
   agentWakeupRequests,
   companies,
@@ -12,6 +13,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { agentWakeupRequestService } from "../services/agent-wakeup-requests.js";
+import { logActivity } from "../services/activity-log.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -29,6 +31,7 @@ describeEmbeddedPostgres("agent wakeup request service", () => {
   let foreignCompanyId!: string;
   let agentId!: string;
   let foreignAgentId!: string;
+  const actor = { actorType: "user" as const, actorId: "board-user" };
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("agent-wakeup-request-service-");
@@ -70,6 +73,7 @@ describeEmbeddedPostgres("agent wakeup request service", () => {
   });
 
   afterEach(async () => {
+    await db.delete(activityLog);
     await db.delete(agentWakeupRequests);
     await db.delete(agents);
     await db.delete(companies);
@@ -103,7 +107,12 @@ describeEmbeddedPostgres("agent wakeup request service", () => {
       const wakeupRequest = await insertWakeupRequest({ status });
       const service = agentWakeupRequestService(db);
 
-      const result = await service.cancel(wakeupRequest.id, companyId, "Operator reconciliation");
+      const result = await service.cancel(
+        wakeupRequest.id,
+        companyId,
+        "Operator reconciliation",
+        actor,
+      );
 
       expect(result).toMatchObject({
         outcome: "cancelled",
@@ -124,8 +133,18 @@ describeEmbeddedPostgres("agent wakeup request service", () => {
     const wakeupRequest = await insertWakeupRequest({ status: "queued" });
     const service = agentWakeupRequestService(db);
 
-    const first = await service.cancel(wakeupRequest.id, companyId, "First operator reason");
-    const repeated = await service.cancel(wakeupRequest.id, companyId, "Second operator reason");
+    const first = await service.cancel(
+      wakeupRequest.id,
+      companyId,
+      "First operator reason",
+      actor,
+    );
+    const repeated = await service.cancel(
+      wakeupRequest.id,
+      companyId,
+      "Second operator reason",
+      actor,
+    );
 
     expect(first?.outcome).toBe("cancelled");
     expect(repeated).toMatchObject({
@@ -148,6 +167,7 @@ describeEmbeddedPostgres("agent wakeup request service", () => {
       wakeupRequest.id,
       foreignCompanyId,
       "Foreign operator reason",
+      actor,
     );
     const persisted = await db
       .select()
@@ -171,7 +191,12 @@ describeEmbeddedPostgres("agent wakeup request service", () => {
     const wakeupRequest = await insertWakeupRequest({ status, runId });
     const service = agentWakeupRequestService(db);
 
-    const result = await service.cancel(wakeupRequest.id, companyId, "Must not cancel");
+    const result = await service.cancel(
+      wakeupRequest.id,
+      companyId,
+      "Must not cancel",
+      actor,
+    );
     const persisted = await db
       .select()
       .from(agentWakeupRequests)
@@ -189,5 +214,85 @@ describeEmbeddedPostgres("agent wakeup request service", () => {
       error: null,
       finishedAt: null,
     });
+  });
+
+  it("rolls back both the cancellation and its audit record when audit persistence fails", async () => {
+    const wakeupRequest = await insertWakeupRequest({ status: "queued" });
+    const activityPublisher = vi.fn();
+    const service = agentWakeupRequestService(db, {
+      activityPublisher,
+      activityLogger: async (txDb, input, postCommitPublications) => {
+        await logActivity(txDb, input, postCommitPublications);
+        throw new Error("Injected audit persistence failure");
+      },
+    });
+
+    await expect(service.cancel(
+      wakeupRequest.id,
+      companyId,
+      "Operator reconciliation",
+      actor,
+    )).rejects.toThrow("Injected audit persistence failure");
+
+    const afterFailure = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequest.id))
+      .then((rows) => rows[0]!);
+    const auditRowsAfterFailure = await db
+      .select()
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.action, "agent_wakeup_request.cancelled"),
+        eq(activityLog.entityId, wakeupRequest.id),
+      ));
+
+    expect(afterFailure).toMatchObject({
+      status: "queued",
+      error: null,
+      finishedAt: null,
+    });
+    expect(auditRowsAfterFailure).toHaveLength(0);
+    expect(activityPublisher).not.toHaveBeenCalled();
+
+    const retry = await agentWakeupRequestService(db).cancel(
+      wakeupRequest.id,
+      companyId,
+      "Operator reconciliation",
+      actor,
+    );
+    const auditRowsAfterRetry = await db
+      .select()
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.action, "agent_wakeup_request.cancelled"),
+        eq(activityLog.entityId, wakeupRequest.id),
+      ));
+
+    expect(retry?.outcome).toBe("cancelled");
+    expect(auditRowsAfterRetry).toHaveLength(1);
+  });
+
+  it("cancels and audits once when two operators race", async () => {
+    const wakeupRequest = await insertWakeupRequest({ status: "deferred_issue_execution" });
+    const service = agentWakeupRequestService(db);
+
+    const results = await Promise.all([
+      service.cancel(wakeupRequest.id, companyId, "Concurrent reconciliation", actor),
+      service.cancel(wakeupRequest.id, companyId, "Concurrent reconciliation", actor),
+    ]);
+    const auditRows = await db
+      .select()
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.action, "agent_wakeup_request.cancelled"),
+        eq(activityLog.entityId, wakeupRequest.id),
+      ));
+
+    expect(results.map((result) => result?.outcome).sort()).toEqual([
+      "already_cancelled",
+      "cancelled",
+    ]);
+    expect(auditRows).toHaveLength(1);
   });
 });

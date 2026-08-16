@@ -48,7 +48,6 @@ import {
   builtInAgentService,
   companySkillService,
   budgetService,
-  agentWakeupRequestService,
   heartbeatService,
   ISSUE_LIST_DEFAULT_LIMIT,
   issueApprovalService,
@@ -150,6 +149,7 @@ import {
   changeConsentGateService,
   touchesAgentProfileChangeConsentFields,
 } from "../services/change-consent-gate.js";
+import { agentWakeupRequestService } from "../services/agent-wakeup-requests.js";
 
 const AGENT_SKILL_ASSIGNMENT_MODES = ["add", "remove", "replace"] as const;
 
@@ -4607,10 +4607,15 @@ export function agentRoutes(
       );
       if (!existing) return;
 
+      const actor = getActorInfo(req);
       const result = await wakeupRequests.cancel(
         wakeupRequestId,
         existing.companyId,
         req.body.reason,
+        {
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+        },
       );
       if (!result) {
         res.status(404).json({ error: "Agent wakeup request not found" });
@@ -4624,23 +4629,6 @@ export function agentRoutes(
           runId: result.wakeupRequest.runId,
         });
         return;
-      }
-
-      if (result.outcome === "cancelled") {
-        const actor = getActorInfo(req);
-        await logActivity(db, {
-          companyId: result.wakeupRequest.companyId,
-          actorType: actor.actorType,
-          actorId: actor.actorId,
-          agentId: result.wakeupRequest.agentId,
-          action: "agent_wakeup_request.cancelled",
-          entityType: "agent_wakeup_request",
-          entityId: result.wakeupRequest.id,
-          details: {
-            previousStatus: result.previousStatus,
-            reason: req.body.reason,
-          },
-        });
       }
 
       res.json(result);

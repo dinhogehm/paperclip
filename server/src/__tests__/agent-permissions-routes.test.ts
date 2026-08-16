@@ -168,6 +168,10 @@ function registerModuleMocks() {
     heartbeatService: () => mockHeartbeatService,
   }));
 
+  vi.doMock("../services/agent-wakeup-requests.js", () => ({
+    agentWakeupRequestService: () => mockAgentWakeupRequestService,
+  }));
+
   vi.doMock("../services/issue-approvals.js", () => ({
     issueApprovalService: () => mockIssueApprovalService,
   }));
@@ -299,6 +303,7 @@ describe.sequential("agent permission routes", () => {
     vi.doUnmock("../services/budgets.js");
     vi.doUnmock("../services/company-skills.js");
     vi.doUnmock("../services/heartbeat.js");
+    vi.doUnmock("../services/agent-wakeup-requests.js");
     vi.doUnmock("../services/index.js");
     vi.doUnmock("../services/instance-settings.js");
     vi.doUnmock("../services/issue-approvals.js");
@@ -1968,21 +1973,8 @@ describe.sequential("agent permission routes", () => {
       wakeupRequestId,
       companyId,
       "Stale completed issue",
+      { actorType: "user", actorId: "board-user" },
     );
-    expect(mockLogActivity).toHaveBeenCalledTimes(1);
-    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      companyId,
-      actorType: "user",
-      actorId: "board-user",
-      agentId,
-      action: "agent_wakeup_request.cancelled",
-      entityType: "agent_wakeup_request",
-      entityId: wakeupRequestId,
-      details: {
-        previousStatus: "deferred_issue_execution",
-        reason: "Stale completed issue",
-      },
-    }));
   }, 20_000);
 
   it("hides wakeup requests outside the caller company scope", async () => {
