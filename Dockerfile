@@ -79,7 +79,9 @@ WORKDIR /app
 RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
   && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest @railway/cli@latest agent-browser@latest opencode-ai @google/gemini-cli@latest \
   && apt-get update \
-  && apt-get install -y --no-install-recommends chromium jq openssh-client zsh \
+  && apt-get install -y --no-install-recommends chromium jq openssh-client sqlite3 tini zsh \
+  && command -v sqlite3 >/dev/null \
+  && command -v tini >/dev/null \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /paperclip \
   && chown node:node /paperclip
@@ -112,7 +114,9 @@ EXPOSE 3100
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=5 \
   CMD curl --fail --silent --show-error "http://127.0.0.1:${PORT:-3100}/api/health" >/dev/null || exit 1
 
-ENTRYPOINT ["docker-entrypoint.sh"]
+# Keep Node out of PID 1: tini forwards signals and reaps orphaned CLI/browser
+# descendants before the shell entrypoint execs the server as the node user.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
 
 # Cloud image variant (build with `--target cloud`): the production image
