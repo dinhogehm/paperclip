@@ -5,8 +5,8 @@ import type {
 } from "@paperclipai/adapter-utils";
 import {
   asString,
+  buildWorkloadProcessEnv,
   parseObject,
-  ensurePathInEnv,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   ensureAdapterExecutionTargetCommandResolvable,
@@ -258,7 +258,7 @@ export async function testEnvironment(
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const runtimeEnv = buildWorkloadProcessEnv(env);
   const installCheck = await maybeRunSandboxInstallCommand({
     runId,
     target,

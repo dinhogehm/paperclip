@@ -7,6 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AdapterRuntimeServiceReport } from "@paperclipai/adapter-utils";
+import { sanitizeInheritedControlPlaneEnv } from "@paperclipai/adapter-utils/server-utils";
 import type { Db } from "@paperclipai/db";
 import { executionWorkspaces, issueComments, issues, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
 import {
@@ -350,16 +351,7 @@ export async function ensureServerWorkspaceLinksCurrent(
 }
 
 export function sanitizeRuntimeServiceBaseEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...baseEnv };
-  for (const key of Object.keys(env)) {
-    if (key.startsWith("PAPERCLIP_")) {
-      delete env[key];
-    }
-  }
-  delete env.DATABASE_URL;
-  delete env.npm_config_tailscale_auth;
-  delete env.npm_config_authenticated_private;
-  return env;
+  return sanitizeInheritedControlPlaneEnv(baseEnv);
 }
 
 function stableRuntimeServiceId(input: {
@@ -2452,8 +2444,14 @@ function buildWorkspaceCommandEnv(input: {
   issue: ExecutionWorkspaceIssueRef | null;
   agent: ExecutionWorkspaceAgentRef;
   created: boolean;
+  overrides?: Record<string, string>;
 }) {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const env: NodeJS.ProcessEnv = {
+    ...sanitizeRuntimeServiceBaseEnv(process.env),
+    ...input.overrides,
+  };
+  const managedWorktreesDir = process.env.PAPERCLIP_WORKTREES_DIR?.trim();
+  if (managedWorktreesDir) env.PAPERCLIP_WORKTREES_DIR = managedWorktreesDir;
   env.PAPERCLIP_WORKSPACE_CWD = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_PATH = input.worktreePath;
   env.PAPERCLIP_WORKSPACE_WORKTREE_PATH = input.worktreePath;
@@ -4238,6 +4236,7 @@ async function runRuntimeProvisionWithWorkspaceMutex(input: StartLocalRuntimeSer
       issue: input.issue,
       agent: input.agent,
       created: input.workspace.created,
+      overrides: input.adapterEnv,
     }),
     label: `Runtime provision command "${command}"`,
     metadata: {

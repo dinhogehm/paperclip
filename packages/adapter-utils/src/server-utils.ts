@@ -2335,17 +2335,62 @@ export function refreshPaperclipWorkspaceEnvForExecution(input: {
   return shapedWorkspaceEnv;
 }
 
-export function sanitizeInheritedPaperclipEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+const HOST_CONTROL_PLANE_ENV_KEYS = new Set([
+  "DATABASE_URL",
+  "DATABASE_MIGRATION_URL",
+  "HOST",
+  "NODE_ENV",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "NOTIFY_SOCKET",
+  "PORT",
+  "SERVE_UI",
+  "TRUST_PROXY",
+  "WORKSPACE_OPERATION_LOG_BASE_PATH",
+  "npm_config_authenticated_private",
+  "npm_config_tailscale_auth",
+]);
+
+const HOST_CONTROL_PLANE_ENV_PREFIXES = [
+  "BETTER_AUTH_",
+  "HEARTBEAT_SCHEDULER_",
+  "OTEL_",
+  "PAPERCLIP_",
+  "RAILWAY_",
+  "RUN_LOG_",
+] as const;
+
+const INHERITED_PROVIDER_CREDENTIAL_ENV_KEYS = new Set([
+  "RAILWAY_API_TOKEN",
+  "RAILWAY_TOKEN",
+]);
+
+/**
+ * Remove settings that belong to the Paperclip control plane before crossing
+ * the host -> workspace/agent process boundary. Provider credentials and
+ * ordinary shell state intentionally remain available for backwards
+ * compatibility; an explicit adapter/project env overlay is applied after
+ * this sanitizer by every caller and may therefore opt a workload back into a
+ * key such as NODE_ENV.
+ */
+export function sanitizeInheritedControlPlaneEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   delete env.PAPERCLIPAI_CMD;
   for (const key of Object.keys(env)) {
-    if (!key.startsWith("PAPERCLIP_")) continue;
-    if (key === "PAPERCLIP_RUNTIME_API_URL") continue;
-    if (key === "PAPERCLIP_LISTEN_HOST") continue;
-    if (key === "PAPERCLIP_LISTEN_PORT") continue;
-    delete env[key];
+    if (INHERITED_PROVIDER_CREDENTIAL_ENV_KEYS.has(key)) continue;
+    if (
+      HOST_CONTROL_PLANE_ENV_KEYS.has(key)
+      || HOST_CONTROL_PLANE_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))
+    ) {
+      delete env[key];
+    }
   }
   return env;
+}
+
+/** @deprecated Use sanitizeInheritedControlPlaneEnv for the full host boundary. */
+export function sanitizeInheritedPaperclipEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return sanitizeInheritedControlPlaneEnv(baseEnv);
 }
 
 export function defaultPathForPlatform() {
@@ -2507,6 +2552,19 @@ export function ensurePathInEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (typeof env.PATH === "string" && env.PATH.length > 0) return env;
   if (typeof env.Path === "string" && env.Path.length > 0) return env;
   return { ...env, PATH: defaultPathForPlatform() };
+}
+
+/** Build the effective environment for an agent/workspace child process. */
+export function buildWorkloadProcessEnv(
+  explicitEnv: NodeJS.ProcessEnv,
+  inheritedEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(ensurePathInEnv({
+      ...sanitizeInheritedControlPlaneEnv(inheritedEnv),
+      ...explicitEnv,
+    })).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
 }
 
 export async function ensureAbsoluteDirectory(
@@ -3305,10 +3363,7 @@ export async function runChildProcess(
 ): Promise<RunProcessResult> {
   const onLogError = opts.onLogError ?? ((err, id, msg) => console.warn({ err, runId: id }, msg));
   return new Promise<RunProcessResult>((resolve, reject) => {
-    const rawMerged: NodeJS.ProcessEnv = {
-      ...sanitizeInheritedPaperclipEnv(process.env),
-      ...opts.env,
-    };
+    const rawMerged: NodeJS.ProcessEnv = buildWorkloadProcessEnv(opts.env);
 
     // Strip Claude Code nesting-guard env vars so spawned `claude` processes
     // don't refuse to start with "cannot be launched inside another session".
