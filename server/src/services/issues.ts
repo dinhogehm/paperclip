@@ -130,6 +130,13 @@ import {
   type ActivityPublication,
 } from "./activity-log.js";
 import { buildIssueChanges } from "./issue-change-receipt.js";
+import {
+  assessIssueCodeDeliveryDisposition,
+  CODE_DELIVERY_EVIDENCE_REQUIRED_CODE,
+  persistCodeDeliveryDispositionRejection,
+  readCodeDeliveryEvidenceRequiredDetails,
+  type CodeDeliveryEvidenceRequiredDetails,
+} from "./code-delivery-disposition.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -7481,6 +7488,7 @@ export function issueService(db: Db) {
         blockedByIssueIds?: string[];
         actorAgentId?: string | null;
         actorUserId?: string | null;
+        actorRunId?: string | null;
       },
       dbOrTx: any = db,
       postCommitActivityPublications?: ActivityPublication[],
@@ -7499,6 +7507,7 @@ export function issueService(db: Db) {
         blockedByIssueIds,
         actorAgentId,
         actorUserId,
+        actorRunId,
         ...issueData
       } = data;
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
@@ -7620,6 +7629,43 @@ export function issueService(db: Db) {
         });
       }
 
+      if (actorAgentId && issueData.status === "done" && existing.status !== "done") {
+        const deliveryDisposition = await assessIssueCodeDeliveryDisposition(dbOrTx as Db, {
+          id: existing.id,
+          companyId: existing.companyId,
+          projectId: nextProjectId ?? null,
+          executionWorkspaceId: nextExecutionWorkspaceId ?? null,
+        });
+        if (deliveryDisposition.applicable && !deliveryDisposition.complete) {
+          const rejectionDetails: CodeDeliveryEvidenceRequiredDetails = {
+            code: CODE_DELIVERY_EVIDENCE_REQUIRED_CODE,
+            requiredStage: deliveryDisposition.requiredStage,
+            executionWorkspaceId: deliveryDisposition.executionWorkspaceId,
+            branchName: deliveryDisposition.branchName,
+            evidence: deliveryDisposition.evidence,
+            missingEvidence: deliveryDisposition.missingEvidence,
+          };
+          try {
+            await persistCodeDeliveryDispositionRejection(db, {
+              companyId: existing.companyId,
+              issueId: existing.id,
+              actorAgentId,
+              sourceRunId: actorRunId,
+              details: rejectionDetails,
+            });
+          } catch (activityError) {
+            logger.warn(
+              { err: activityError, issueId: existing.id, actorAgentId, actorRunId },
+              "failed to persist code-delivery disposition rejection activity",
+            );
+          }
+          throw unprocessable(
+            "Code delivery cannot be marked done until the required remote delivery evidence is persisted",
+            rejectionDetails,
+          );
+        }
+      }
+
       applyStatusSideEffects(issueData.status, patch);
       if (issueData.status && issueData.status !== "done") {
         patch.completedAt = null;
@@ -7654,6 +7700,32 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        if (actorAgentId && issueData.status === "done" && receiptExisting.status !== "done") {
+          // Re-check under the issue row lock. When this is the first failing
+          // assessment, the post-rollback catch below (or the HTTP route that
+          // owns the outer transaction) records the durable heartbeat signal.
+          // This closes the narrow race where qualifying work-product evidence
+          // is removed between preflight and persistence.
+          const lockedDeliveryDisposition = await assessIssueCodeDeliveryDisposition(tx as Db, {
+            id: receiptExisting.id,
+            companyId: receiptExisting.companyId,
+            projectId: nextProjectId ?? null,
+            executionWorkspaceId: nextExecutionWorkspaceId ?? null,
+          });
+          if (lockedDeliveryDisposition.applicable && !lockedDeliveryDisposition.complete) {
+            throw unprocessable(
+              "Code delivery cannot be marked done until the required remote delivery evidence is persisted",
+              {
+                code: CODE_DELIVERY_EVIDENCE_REQUIRED_CODE,
+                requiredStage: lockedDeliveryDisposition.requiredStage,
+                executionWorkspaceId: lockedDeliveryDisposition.executionWorkspaceId,
+                branchName: lockedDeliveryDisposition.branchName,
+                evidence: lockedDeliveryDisposition.evidence,
+                missingEvidence: lockedDeliveryDisposition.missingEvidence,
+              },
+            );
+          }
+        }
         const [previousLabelsByIssueId, previousRelationSummaries] = await Promise.all([
           nextLabelIds !== undefined
             ? labelMapForIssues(tx, [id])
@@ -7891,7 +7963,33 @@ export function issueService(db: Db) {
         };
       };
 
-      const result = await (dbOrTx === db ? db.transaction(runUpdate) : runUpdate(dbOrTx));
+      let result: Awaited<ReturnType<typeof runUpdate>>;
+      try {
+        result = await (dbOrTx === db ? db.transaction(runUpdate) : runUpdate(dbOrTx));
+      } catch (error) {
+        // An evidence row can disappear after the unlocked preflight but before
+        // the second check under the issue row lock. For service-owned
+        // transactions the lock has been rolled back by the time this catch
+        // runs, so recording the rejection here is deadlock-safe. Callers that
+        // supplied an outer transaction (the HTTP route) record after that
+        // outer transaction rolls back.
+        const rejectionDetails = readCodeDeliveryEvidenceRequiredDetails(error);
+        if (dbOrTx === db && actorAgentId && rejectionDetails) {
+          await persistCodeDeliveryDispositionRejection(db, {
+            companyId: existing.companyId,
+            issueId: existing.id,
+            actorAgentId,
+            sourceRunId: actorRunId,
+            details: rejectionDetails,
+          }).catch((activityError) => {
+            logger.warn(
+              { err: activityError, issueId: existing.id, actorAgentId, actorRunId },
+              "failed to persist post-rollback code-delivery disposition rejection activity",
+            );
+          });
+        }
+        throw error;
+      }
       if (dbOrTx === db && !postCommitActivityPublications) {
         for (const publication of ownedActivityPublications) publishActivity(publication);
       }
