@@ -971,6 +971,7 @@ instances return `404`.
 - `POST /agents/:agentId/terminate`
 - `POST /agents/:agentId/keys` (create API key)
 - `POST /agents/:agentId/heartbeat/invoke`
+- `POST /agent-wakeup-requests/:wakeupRequestId/cancel` (board-only, queued or deferred requests without a bound run)
 
 ## 10.4 Tasks (Issues)
 

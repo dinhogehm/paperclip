@@ -218,6 +218,12 @@ export const wakeAgentSchema = z.object({
 
 export type WakeAgent = z.infer<typeof wakeAgentSchema>;
 
+export const cancelAgentWakeupRequestSchema = z.object({
+  reason: z.string().trim().min(1).max(1000),
+}).strict();
+
+export type CancelAgentWakeupRequest = z.infer<typeof cancelAgentWakeupRequestSchema>;
+
 export const resetAgentSessionSchema = z.object({
   taskKey: z.string().min(1).optional().nullable(),
 });

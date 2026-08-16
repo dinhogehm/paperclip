@@ -16,6 +16,7 @@ import {
   isUuidLike,
   normalizeIssueIdentifier,
   resetAgentSessionSchema,
+  cancelAgentWakeupRequestSchema,
   testAdapterEnvironmentSchema,
   type AgentDesiredSkillEntry,
   type AgentSkillAssignmentMode,
@@ -47,6 +48,7 @@ import {
   builtInAgentService,
   companySkillService,
   budgetService,
+  agentWakeupRequestService,
   heartbeatService,
   ISSUE_LIST_DEFAULT_LIMIT,
   issueApprovalService,
@@ -380,6 +382,7 @@ export function agentRoutes(
   options.onSetupTokenLoginService?.(setupTokenLoginService);
 
   const runRedactions = createRunSecretRedactionRegistry(db);
+  const wakeupRequests = agentWakeupRequestService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
@@ -4589,6 +4592,60 @@ export function agentRoutes(
     });
     res.json(result.run);
   });
+
+  router.post(
+    "/agent-wakeup-requests/:wakeupRequestId/cancel",
+    validate(cancelAgentWakeupRequestSchema),
+    async (req, res) => {
+      assertBoard(req);
+      const wakeupRequestId = req.params.wakeupRequestId as string;
+      const existing = await getAccessibleResource(
+        req,
+        res,
+        wakeupRequests.getById(wakeupRequestId),
+        "Agent wakeup request not found",
+      );
+      if (!existing) return;
+
+      const result = await wakeupRequests.cancel(
+        wakeupRequestId,
+        existing.companyId,
+        req.body.reason,
+      );
+      if (!result) {
+        res.status(404).json({ error: "Agent wakeup request not found" });
+        return;
+      }
+      if (result.outcome === "conflict") {
+        res.status(409).json({
+          error: "agent_wakeup_request_not_cancellable",
+          reason: result.reason,
+          status: result.wakeupRequest.status,
+          runId: result.wakeupRequest.runId,
+        });
+        return;
+      }
+
+      if (result.outcome === "cancelled") {
+        const actor = getActorInfo(req);
+        await logActivity(db, {
+          companyId: result.wakeupRequest.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: result.wakeupRequest.agentId,
+          action: "agent_wakeup_request.cancelled",
+          entityType: "agent_wakeup_request",
+          entityId: result.wakeupRequest.id,
+          details: {
+            previousStatus: result.previousStatus,
+            reason: req.body.reason,
+          },
+        });
+      }
+
+      res.json(result);
+    },
+  );
 
   router.post("/heartbeat-runs/:runId/watchdog-decisions", async (req, res) => {
     const runId = req.params.runId as string;
