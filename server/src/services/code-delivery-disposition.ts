@@ -1,11 +1,13 @@
 import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
+  activityLog,
   executionWorkspaces,
   issueWorkProducts,
   projects,
   type issues,
 } from "@paperclipai/db";
+import { logActivity } from "./activity-log.js";
 
 export const CODE_DELIVERY_EVIDENCE_REQUIRED_CODE = "code_delivery_evidence_required";
 export const CODE_DELIVERY_DISPOSITION_REJECTED_ACTION = "issue.code_delivery_disposition_rejected";
@@ -69,6 +71,15 @@ export type CodeDeliveryDispositionAssessment =
       missingEvidence: CodeDeliveryRequiredStage[];
     };
 
+export type CodeDeliveryEvidenceRequiredDetails = {
+  code: typeof CODE_DELIVERY_EVIDENCE_REQUIRED_CODE;
+  requiredStage: CodeDeliveryRequiredStage;
+  executionWorkspaceId: string;
+  branchName: string | null;
+  evidence: CodeDeliveryEvidence;
+  missingEvidence: CodeDeliveryRequiredStage[];
+};
+
 function readRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -83,6 +94,77 @@ function readBoolean(value: unknown) {
   return typeof value === "boolean" ? value : null;
 }
 
+export function readCodeDeliveryEvidenceRequiredDetails(
+  errorOrDetails: unknown,
+): CodeDeliveryEvidenceRequiredDetails | null {
+  const candidate = readRecord(errorOrDetails);
+  const details = candidate.details && typeof candidate.details === "object"
+    ? readRecord(candidate.details)
+    : candidate;
+  if (details.code !== CODE_DELIVERY_EVIDENCE_REQUIRED_CODE) return null;
+  const requiredStage = normalizeRequiredStage(details.requiredStage);
+  const executionWorkspaceId = readString(details.executionWorkspaceId);
+  const evidence = readRecord(details.evidence);
+  if (!requiredStage || !executionWorkspaceId) return null;
+  const missingEvidence = Array.isArray(details.missingEvidence)
+    ? details.missingEvidence
+      .map(normalizeRequiredStage)
+      .filter((stage): stage is CodeDeliveryRequiredStage => stage !== null)
+    : [];
+  return {
+    code: CODE_DELIVERY_EVIDENCE_REQUIRED_CODE,
+    requiredStage,
+    executionWorkspaceId,
+    branchName: readString(details.branchName),
+    evidence: {
+      localImplementation: evidence.localImplementation === true,
+      remoteBranch: evidence.remoteBranch === true,
+      pullRequest: evidence.pullRequest === true,
+      merged: evidence.merged === true,
+      deployed: evidence.deployed === true,
+    },
+    missingEvidence,
+  };
+}
+
+export async function persistCodeDeliveryDispositionRejection(
+  db: Db,
+  input: {
+    companyId: string;
+    issueId: string;
+    actorAgentId: string;
+    sourceRunId?: string | null;
+    details: CodeDeliveryEvidenceRequiredDetails;
+  },
+) {
+  const existing = input.sourceRunId
+    ? await db
+      .select({ id: activityLog.id })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.companyId, input.companyId),
+        eq(activityLog.entityType, "issue"),
+        eq(activityLog.entityId, input.issueId),
+        eq(activityLog.runId, input.sourceRunId),
+        eq(activityLog.action, CODE_DELIVERY_DISPOSITION_REJECTED_ACTION),
+      ))
+      .limit(1)
+      .then((rows) => rows[0] ?? null)
+    : null;
+  if (existing) return existing;
+  return logActivity(db, {
+    companyId: input.companyId,
+    actorType: "agent",
+    actorId: input.actorAgentId,
+    agentId: input.actorAgentId,
+    runId: input.sourceRunId ?? null,
+    action: CODE_DELIVERY_DISPOSITION_REJECTED_ACTION,
+    entityType: "issue",
+    entityId: input.issueId,
+    details: input.details,
+  });
+}
+
 function normalizePolicyToken(value: unknown) {
   return readString(value)?.toLowerCase().replace(/[\s-]+/g, "_") ?? null;
 }
@@ -95,6 +177,49 @@ function normalizeRequiredStage(value: unknown): CodeDeliveryRequiredStage | nul
   if (["merge", "merged", "merged_pr"].includes(token)) return "merged";
   if (["deploy", "deployed", "production", "production_deploy"].includes(token)) return "deployed";
   return null;
+}
+
+export function orderCodeDeliveryHandoffCandidateIds(input: {
+  sourceAgentId: string;
+  sourceReportsTo: string | null;
+  governanceAgentIds: string[];
+  companyAgents: Array<{
+    id: string;
+    role: string | null;
+    reportsTo: string | null;
+  }>;
+}) {
+  const byId = new Map(input.companyAgents.map((candidate) => [candidate.id, candidate]));
+  const deliveryRoles = new Set(["devops", "release_manager", "platform_engineer"]);
+  const executiveRoles = new Set(["cto", "ceo"]);
+  const role = (candidate: { role: string | null }) => normalizePolicyToken(candidate.role) ?? "";
+  const managerChain: string[] = [];
+  const managerSeen = new Set<string>();
+  let managerId = input.sourceReportsTo;
+  while (managerId && !managerSeen.has(managerId)) {
+    managerSeen.add(managerId);
+    const manager = byId.get(managerId);
+    if (!manager) break;
+    managerChain.push(manager.id);
+    managerId = manager.reportsTo;
+  }
+
+  const ordered = [
+    ...input.governanceAgentIds,
+    ...input.companyAgents.filter((candidate) => deliveryRoles.has(role(candidate))).map((candidate) => candidate.id),
+    ...managerChain,
+    ...input.companyAgents.filter((candidate) => executiveRoles.has(role(candidate))).map((candidate) => candidate.id),
+  ];
+  const seen = new Set<string>();
+  return ordered.filter((candidateId) => {
+    if (
+      candidateId === input.sourceAgentId ||
+      seen.has(candidateId) ||
+      !byId.has(candidateId)
+    ) return false;
+    seen.add(candidateId);
+    return true;
+  });
 }
 
 export function resolveCodeDeliveryRequiredStage(

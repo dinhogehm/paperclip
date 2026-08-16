@@ -261,6 +261,7 @@ import {
   buildFinishCodeDeliveryHandoffIdempotencyKey,
   CODE_DELIVERY_DISPOSITION_REJECTED_ACTION,
   FINISH_CODE_DELIVERY_HANDOFF_REASON,
+  orderCodeDeliveryHandoffCandidateIds,
   runDeclaresCodeDeliveryHandoff,
 } from "./code-delivery-disposition.js";
 import {
@@ -9339,29 +9340,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const companyAgents = await db
       .select()
       .from(agents)
-      .where(eq(agents.companyId, input.issue.companyId));
+      .where(eq(agents.companyId, input.issue.companyId))
+      .orderBy(asc(agents.createdAt), asc(agents.id));
     const byId = new Map(companyAgents.map((candidate) => [candidate.id, candidate]));
     const reservationPolicy = resolvePrGovernanceReservationPolicy(runtimeEnv);
-    const normalizeRole = (value: string | null | undefined) =>
-      value?.trim().toLowerCase().replace(/[\s-]+/g, "_") ?? "";
-    const deliveryRoles = new Set(["devops", "release_manager", "platform_engineer"]);
-    const executiveRoles = new Set(["cto", "ceo"]);
-    const candidateIds = [
-      ...reservationPolicy.agentIds,
-      ...companyAgents.filter((candidate) => deliveryRoles.has(normalizeRole(candidate.role))).map((candidate) => candidate.id),
-      input.sourceAgent.reportsTo,
-      ...companyAgents.filter((candidate) => executiveRoles.has(normalizeRole(candidate.role))).map((candidate) => candidate.id),
-    ].filter((candidateId): candidateId is string => Boolean(candidateId));
+    const candidateIds = orderCodeDeliveryHandoffCandidateIds({
+      sourceAgentId: input.sourceAgent.id,
+      sourceReportsTo: input.sourceAgent.reportsTo,
+      governanceAgentIds: reservationPolicy.agentIds,
+      companyAgents,
+    });
 
-    const seen = new Set<string>();
     for (const candidateId of candidateIds) {
-      if (seen.has(candidateId)) continue;
-      seen.add(candidateId);
       const candidate = byId.get(candidateId);
-      // The source executor has already declared the remote step outside its
-      // authority. Reassigning to the same row would also defeat the CAS below,
-      // which is what makes concurrent finalizers unable to enqueue two wakes.
-      if (!candidate || candidate.id === input.sourceAgent.id) continue;
+      if (!candidate) continue;
       const [invokability, budgetBlock] = await Promise.all([
         getAgentInvokability(candidate),
         budgets.getInvocationBlock(input.issue.companyId, candidate.id, {
@@ -9449,7 +9441,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     const assessment = await assessIssueCodeDeliveryDisposition(db, issue);
     if (!assessment.applicable || assessment.complete) return false;
-    if (!rejection && !assessment.evidence.localImplementation) return false;
+    // A remote-delivery owner can only finish work that actually exists. A
+    // rejected Done attempt without a persisted local commit/branch belongs to
+    // the normal implementation-continuation path, not to DevOps.
+    if (!assessment.evidence.localImplementation) return false;
     const idempotencyKey = buildFinishCodeDeliveryHandoffIdempotencyKey({
       issueId: issue.id,
       sourceRunId: run.id,

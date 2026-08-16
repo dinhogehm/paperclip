@@ -3867,11 +3867,24 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
 
     const routedIssue = await db
-      .select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId })
+      .select({
+        status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+        executionWorkspaceId: issues.executionWorkspaceId,
+      })
       .from(issues)
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0] ?? null);
-    expect(routedIssue).toEqual({ status: "in_progress", assigneeAgentId: devOpsAgentId });
+    expect(routedIssue).toEqual({
+      status: "in_progress",
+      assigneeAgentId: devOpsAgentId,
+      executionWorkspaceId,
+    });
+    expect(await db
+      .select({ branchName: executionWorkspaces.branchName, status: executionWorkspaces.status })
+      .from(executionWorkspaces)
+      .where(eq(executionWorkspaces.id, executionWorkspaceId)))
+      .toEqual([{ branchName: "pap/delivery-guard", status: "active" }]);
     expect(await db
       .select({ id: agentWakeupRequests.id })
       .from(agentWakeupRequests)

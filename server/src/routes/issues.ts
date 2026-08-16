@@ -144,6 +144,10 @@ import {
 } from "../services/recovery/review-path-recovery.js";
 import { hydrateSuccessfulRunHandoffLiveness } from "../services/successful-run-handoff-state.js";
 import {
+  persistCodeDeliveryDispositionRejection,
+  readCodeDeliveryEvidenceRequiredDetails,
+} from "../services/code-delivery-disposition.js";
+import {
   TASK_WATCHDOG_ORIGIN_KIND,
   resolveTaskWatchdogMutationScope,
   taskWatchdogScopeAllowsIssueMutation,
@@ -9372,6 +9376,21 @@ export function issueRoutes(
       }
     } catch (err) {
       if (err instanceof HttpError && err.status === 422) {
+        const deliveryRejection = readCodeDeliveryEvidenceRequiredDetails(err);
+        if (actor.agentId && deliveryRejection) {
+          await persistCodeDeliveryDispositionRejection(db, {
+            companyId: existing.companyId,
+            issueId: existing.id,
+            actorAgentId: actor.agentId,
+            sourceRunId: actor.runId,
+            details: deliveryRejection,
+          }).catch((activityError) => {
+            logger.warn(
+              { err: activityError, issueId: existing.id, actorAgentId: actor.agentId, actorRunId: actor.runId },
+              "failed to persist route-level code-delivery disposition rejection activity",
+            );
+          });
+        }
         logger.warn(
           {
             issueId: id,

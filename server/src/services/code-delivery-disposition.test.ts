@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildFinishCodeDeliveryHandoffIdempotencyKey,
   evaluateCodeDeliveryEvidence,
+  orderCodeDeliveryHandoffCandidateIds,
   resolveCodeDeliveryRequiredStage,
   runDeclaresCodeDeliveryHandoff,
 } from "./code-delivery-disposition.js";
@@ -174,5 +175,27 @@ describe("code delivery disposition", () => {
     expect(runDeclaresCodeDeliveryHandoff({
       nextAction: "Executar os testes restantes localmente.",
     })).toBe(false);
+  });
+
+  it("orders real governance, DevOps, and the full manager ladder without duplicates", () => {
+    expect(orderCodeDeliveryHandoffCandidateIds({
+      sourceAgentId: "source",
+      sourceReportsTo: "paused-manager",
+      governanceAgentIds: ["foreign", "governance", "devops", "governance", "source"],
+      companyAgents: [
+        { id: "source", role: "engineer", reportsTo: "paused-manager" },
+        { id: "governance", role: "qa", reportsTo: null },
+        { id: "devops", role: "DevOps", reportsTo: null },
+        { id: "paused-manager", role: "general", reportsTo: "senior-manager" },
+        { id: "senior-manager", role: "general", reportsTo: "paused-manager" },
+        { id: "cto", role: "cto", reportsTo: null },
+      ],
+    })).toEqual([
+      "governance",
+      "devops",
+      "paused-manager",
+      "senior-manager",
+      "cto",
+    ]);
   });
 });
