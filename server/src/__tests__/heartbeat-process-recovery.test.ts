@@ -114,6 +114,9 @@ import {
 } from "../services/hot-restart.ts";
 import { secretService } from "../services/secrets.ts";
 import {
+  FINISH_CODE_DELIVERY_HANDOFF_REASON,
+} from "../services/code-delivery-disposition.ts";
+import {
   SUCCESSFUL_RUN_HANDOFF_EXHAUSTED_NOTICE_BODY,
   SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY,
   SUCCESSFUL_RUN_MISSING_STATE_REASON,
@@ -3744,6 +3747,145 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .from(activityLog)
       .where(eq(activityLog.entityId, issueId));
     expect(activity.some((event) => event.action === "issue.successful_run_handoff_required")).toBe(true);
+  });
+
+  it("routes declared local-only delivery to PR governance exactly once", async () => {
+    const { companyId, agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    const projectId = randomUUID();
+    const executionWorkspaceId = randomUUID();
+    const devOpsAgentId = randomUUID();
+    const devOpsBusyRunId = randomUUID();
+
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Remote delivery project",
+      status: "in_progress",
+      executionWorkspacePolicy: {
+        enabled: true,
+        pullRequestPolicy: { prMode: "agent_may_open" },
+      },
+    });
+    await db.insert(executionWorkspaces).values({
+      id: executionWorkspaceId,
+      companyId,
+      projectId,
+      sourceIssueId: issueId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      providerType: "git_worktree",
+      name: "Delivery worktree",
+      status: "active",
+      repoUrl: "https://github.com/example/repo.git",
+      branchName: "pap/delivery-guard",
+    });
+    await db
+      .update(issues)
+      .set({ projectId, executionWorkspaceId })
+      .where(eq(issues.id, issueId));
+    await db.insert(agents).values({
+      id: devOpsAgentId,
+      companyId,
+      name: "PR governor",
+      role: "devops",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {
+        heartbeat: {
+          wakeOnDemand: true,
+          maxConcurrentRuns: 1,
+        },
+      },
+      permissions: {},
+    });
+    // Keep the governance agent at capacity so the handoff stays queued and the
+    // test observes the source finalizer without executing a second adapter.
+    await db.insert(heartbeatRuns).values({
+      id: devOpsBusyRunId,
+      companyId,
+      agentId: devOpsAgentId,
+      invocationSource: "automation",
+      triggerDetail: "system",
+      status: "running",
+      responsibleUserId: "responsible-user",
+      contextSnapshot: {},
+      startedAt: new Date(),
+    });
+
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      await db.insert(issueWorkProducts).values({
+        companyId,
+        projectId,
+        issueId,
+        executionWorkspaceId,
+        type: "commit",
+        provider: "paperclip",
+        externalId: "abc123",
+        title: "Local implementation commit",
+        status: "active",
+        createdByRunId: runId,
+      });
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        errorMessage: null,
+        summary: "Implementation committed locally; push and PR are owned by DevOps.",
+        provider: "test",
+        model: "test-model",
+      };
+    });
+    const heartbeat = heartbeatService(db, {
+      runtimeEnv: {
+        PAPERCLIP_PR_GOVERNANCE_AGENT_IDS: devOpsAgentId,
+      },
+    });
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForRunToSettle(heartbeat, runId, 5_000);
+
+    const handoffWakeups = await waitForValue(async () => {
+      const rows = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.reason, FINISH_CODE_DELIVERY_HANDOFF_REASON));
+      return rows.length > 0 ? rows : null;
+    }, 5_000);
+    expect(handoffWakeups).toHaveLength(1);
+    expect(handoffWakeups[0]).toMatchObject({
+      agentId: devOpsAgentId,
+      status: "queued",
+      idempotencyKey: `${FINISH_CODE_DELIVERY_HANDOFF_REASON}:${issueId}:${runId}:pull_request:1`,
+      payload: {
+        issueId,
+        sourceRunId: runId,
+        executionWorkspaceId,
+        requiredStage: "pull_request",
+        missingEvidence: ["remote_branch", "pull_request"],
+      },
+    });
+
+    const routedIssue = await db
+      .select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(routedIssue).toEqual({ status: "in_progress", assigneeAgentId: devOpsAgentId });
+    expect(await db
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.reason, "finish_successful_run_handoff"),
+        eq(agentWakeupRequests.agentId, agentId),
+      ))).toHaveLength(0);
+
+    // Re-running scheduler reconciliation must not manufacture a second handoff.
+    await heartbeat.resumeQueuedRuns();
+    expect(await db
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.reason, FINISH_CODE_DELIVERY_HANDOFF_REASON))).toHaveLength(1);
   });
 
   it("requeues a missing-disposition handoff when the previous corrective wake was cancelled", async () => {

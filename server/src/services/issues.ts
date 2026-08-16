@@ -130,6 +130,11 @@ import {
   type ActivityPublication,
 } from "./activity-log.js";
 import { buildIssueChanges } from "./issue-change-receipt.js";
+import {
+  assessIssueCodeDeliveryDisposition,
+  CODE_DELIVERY_DISPOSITION_REJECTED_ACTION,
+  CODE_DELIVERY_EVIDENCE_REQUIRED_CODE,
+} from "./code-delivery-disposition.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -7481,6 +7486,7 @@ export function issueService(db: Db) {
         blockedByIssueIds?: string[];
         actorAgentId?: string | null;
         actorUserId?: string | null;
+        actorRunId?: string | null;
       },
       dbOrTx: any = db,
       postCommitActivityPublications?: ActivityPublication[],
@@ -7499,6 +7505,7 @@ export function issueService(db: Db) {
         blockedByIssueIds,
         actorAgentId,
         actorUserId,
+        actorRunId,
         ...issueData
       } = data;
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
@@ -7620,6 +7627,63 @@ export function issueService(db: Db) {
         });
       }
 
+      if (actorAgentId && issueData.status === "done" && existing.status !== "done") {
+        const deliveryDisposition = await assessIssueCodeDeliveryDisposition(dbOrTx as Db, {
+          id: existing.id,
+          companyId: existing.companyId,
+          projectId: nextProjectId ?? null,
+          executionWorkspaceId: nextExecutionWorkspaceId ?? null,
+        });
+        if (deliveryDisposition.applicable && !deliveryDisposition.complete) {
+          const rejectionDetails = {
+            code: CODE_DELIVERY_EVIDENCE_REQUIRED_CODE,
+            requiredStage: deliveryDisposition.requiredStage,
+            executionWorkspaceId: deliveryDisposition.executionWorkspaceId,
+            branchName: deliveryDisposition.branchName,
+            evidence: deliveryDisposition.evidence,
+            missingEvidence: deliveryDisposition.missingEvidence,
+          };
+          try {
+            const existingRejection = actorRunId
+              ? await db
+                .select({ id: activityLog.id })
+                .from(activityLog)
+                .where(and(
+                  eq(activityLog.companyId, existing.companyId),
+                  eq(activityLog.entityType, "issue"),
+                  eq(activityLog.entityId, existing.id),
+                  eq(activityLog.runId, actorRunId),
+                  eq(activityLog.action, CODE_DELIVERY_DISPOSITION_REJECTED_ACTION),
+                ))
+                .limit(1)
+                .then((rows) => rows[0] ?? null)
+              : null;
+            if (!existingRejection) {
+              await logActivity(db, {
+                companyId: existing.companyId,
+                actorType: "agent",
+                actorId: actorAgentId,
+                agentId: actorAgentId,
+                runId: actorRunId ?? null,
+                action: CODE_DELIVERY_DISPOSITION_REJECTED_ACTION,
+                entityType: "issue",
+                entityId: existing.id,
+                details: rejectionDetails,
+              });
+            }
+          } catch (activityError) {
+            logger.warn(
+              { err: activityError, issueId: existing.id, actorAgentId, actorRunId },
+              "failed to persist code-delivery disposition rejection activity",
+            );
+          }
+          throw unprocessable(
+            "Code delivery cannot be marked done until the required remote delivery evidence is persisted",
+            rejectionDetails,
+          );
+        }
+      }
+
       applyStatusSideEffects(issueData.status, patch);
       if (issueData.status && issueData.status !== "done") {
         patch.completedAt = null;
@@ -7654,6 +7718,31 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        if (actorAgentId && issueData.status === "done" && receiptExisting.status !== "done") {
+          // Re-check under the issue row lock. The preflight above records the
+          // durable rejection event used by heartbeat; this second check closes
+          // the narrow race where qualifying work-product evidence is removed
+          // between preflight and persistence.
+          const lockedDeliveryDisposition = await assessIssueCodeDeliveryDisposition(tx as Db, {
+            id: receiptExisting.id,
+            companyId: receiptExisting.companyId,
+            projectId: nextProjectId ?? null,
+            executionWorkspaceId: nextExecutionWorkspaceId ?? null,
+          });
+          if (lockedDeliveryDisposition.applicable && !lockedDeliveryDisposition.complete) {
+            throw unprocessable(
+              "Code delivery cannot be marked done until the required remote delivery evidence is persisted",
+              {
+                code: CODE_DELIVERY_EVIDENCE_REQUIRED_CODE,
+                requiredStage: lockedDeliveryDisposition.requiredStage,
+                executionWorkspaceId: lockedDeliveryDisposition.executionWorkspaceId,
+                branchName: lockedDeliveryDisposition.branchName,
+                evidence: lockedDeliveryDisposition.evidence,
+                missingEvidence: lockedDeliveryDisposition.missingEvidence,
+              },
+            );
+          }
+        }
         const [previousLabelsByIssueId, previousRelationSummaries] = await Promise.all([
           nextLabelIds !== undefined
             ? labelMapForIssues(tx, [id])

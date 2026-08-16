@@ -257,6 +257,13 @@ import {
   withGlobalLlmStartLock,
 } from "./llm-capacity.js";
 import {
+  assessIssueCodeDeliveryDisposition,
+  buildFinishCodeDeliveryHandoffIdempotencyKey,
+  CODE_DELIVERY_DISPOSITION_REJECTED_ACTION,
+  FINISH_CODE_DELIVERY_HANDOFF_REASON,
+  runDeclaresCodeDeliveryHandoff,
+} from "./code-delivery-disposition.js";
+import {
   evaluateAgentInvokability,
   evaluateAgentInvokabilityFromDb,
   shouldCancelRunsForNonInvokableAgent,
@@ -9325,6 +9332,273 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     );
   }
 
+  async function resolveCodeDeliveryHandoffAgent(input: {
+    issue: Pick<typeof issues.$inferSelect, "id" | "companyId" | "projectId">;
+    sourceAgent: typeof agents.$inferSelect;
+  }) {
+    const companyAgents = await db
+      .select()
+      .from(agents)
+      .where(eq(agents.companyId, input.issue.companyId));
+    const byId = new Map(companyAgents.map((candidate) => [candidate.id, candidate]));
+    const reservationPolicy = resolvePrGovernanceReservationPolicy(runtimeEnv);
+    const normalizeRole = (value: string | null | undefined) =>
+      value?.trim().toLowerCase().replace(/[\s-]+/g, "_") ?? "";
+    const deliveryRoles = new Set(["devops", "release_manager", "platform_engineer"]);
+    const executiveRoles = new Set(["cto", "ceo"]);
+    const candidateIds = [
+      ...reservationPolicy.agentIds,
+      ...companyAgents.filter((candidate) => deliveryRoles.has(normalizeRole(candidate.role))).map((candidate) => candidate.id),
+      input.sourceAgent.reportsTo,
+      ...companyAgents.filter((candidate) => executiveRoles.has(normalizeRole(candidate.role))).map((candidate) => candidate.id),
+    ].filter((candidateId): candidateId is string => Boolean(candidateId));
+
+    const seen = new Set<string>();
+    for (const candidateId of candidateIds) {
+      if (seen.has(candidateId)) continue;
+      seen.add(candidateId);
+      const candidate = byId.get(candidateId);
+      // The source executor has already declared the remote step outside its
+      // authority. Reassigning to the same row would also defeat the CAS below,
+      // which is what makes concurrent finalizers unable to enqueue two wakes.
+      if (!candidate || candidate.id === input.sourceAgent.id) continue;
+      const [invokability, budgetBlock] = await Promise.all([
+        getAgentInvokability(candidate),
+        budgets.getInvocationBlock(input.issue.companyId, candidate.id, {
+          issueId: input.issue.id,
+          projectId: input.issue.projectId,
+        }),
+      ]);
+      if (invokability.invokable && !budgetBlock) return candidate;
+    }
+    return null;
+  }
+
+  async function addCodeDeliveryHandoffCommentOnce(input: {
+    issueId: string;
+    run: typeof heartbeatRuns.$inferSelect;
+    targetAgent: typeof agents.$inferSelect;
+    requiredStage: string;
+  }) {
+    const existing = await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(and(
+        eq(issueComments.companyId, input.run.companyId),
+        eq(issueComments.issueId, input.issueId),
+        eq(issueComments.createdByRunId, input.run.id),
+        sql`${issueComments.body} like 'Paperclip routed the remaining code-delivery step to %'`,
+      ))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (existing) return;
+    await issuesSvc.addComment(
+      input.issueId,
+      `Paperclip routed the remaining code-delivery step to **${input.targetAgent.name}**. ` +
+        `A local commit/worktree is not enough to mark this issue done; persisted **${input.requiredStage}** evidence is required.`,
+      { runId: input.run.id },
+      { authorType: "system" },
+    );
+  }
+
+  async function handleCodeDeliveryDispositionHandoff(
+    run: typeof heartbeatRuns.$inferSelect,
+    sourceAgent: typeof agents.$inferSelect,
+  ) {
+    if (run.status !== "succeeded") return false;
+    const context = parseObject(run.contextSnapshot);
+    const issueId = readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId);
+    if (!issueId) return false;
+
+    const rejection = await db
+      .select({ details: activityLog.details })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.companyId, run.companyId),
+        eq(activityLog.entityType, "issue"),
+        eq(activityLog.entityId, issueId),
+        eq(activityLog.runId, run.id),
+        eq(activityLog.action, CODE_DELIVERY_DISPOSITION_REJECTED_ACTION),
+      ))
+      .orderBy(desc(activityLog.createdAt))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    const declaredDeliveryHandoff = runDeclaresCodeDeliveryHandoff(run);
+    if (!rejection && !declaredDeliveryHandoff) return false;
+
+    const issue = await db
+      .select({
+        id: issues.id,
+        companyId: issues.companyId,
+        identifier: issues.identifier,
+        status: issues.status,
+        projectId: issues.projectId,
+        executionWorkspaceId: issues.executionWorkspaceId,
+        assigneeAgentId: issues.assigneeAgentId,
+        assigneeUserId: issues.assigneeUserId,
+      })
+      .from(issues)
+      .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
+      .then((rows) => rows[0] ?? null);
+    if (
+      !issue ||
+      issue.status !== "in_progress" ||
+      issue.assigneeAgentId !== run.agentId ||
+      issue.assigneeUserId
+    ) return false;
+
+    const assessment = await assessIssueCodeDeliveryDisposition(db, issue);
+    if (!assessment.applicable || assessment.complete) return false;
+    if (!rejection && !assessment.evidence.localImplementation) return false;
+    const idempotencyKey = buildFinishCodeDeliveryHandoffIdempotencyKey({
+      issueId: issue.id,
+      sourceRunId: run.id,
+      requiredStage: assessment.requiredStage,
+    });
+    const existingWake = await db
+      .select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.companyId, issue.companyId),
+        eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
+        notInArray(agentWakeupRequests.status, ["skipped", "cancelled"]),
+      ))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (existingWake) return true;
+
+    const targetAgent = await resolveCodeDeliveryHandoffAgent({ issue, sourceAgent });
+    if (!targetAgent) {
+      await logActivity(db, {
+        companyId: issue.companyId,
+        actorType: "system",
+        actorId: "heartbeat",
+        agentId: run.agentId,
+        runId: run.id,
+        action: "issue.code_delivery_handoff_unavailable",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          requiredStage: assessment.requiredStage,
+          missingEvidence: assessment.missingEvidence,
+          reason: "no_invokable_pr_governance_devops_or_manager_agent",
+        },
+      });
+      return false;
+    }
+
+    const reassigned = await db
+      .update(issues)
+      .set({
+        assigneeAgentId: targetAgent.id,
+        assigneeUserId: null,
+        checkoutRunId: null,
+        executionRunId: null,
+        executionAgentNameKey: null,
+        executionLockedAt: null,
+        updatedAt: new Date(),
+      })
+      .where(and(
+        eq(issues.id, issue.id),
+        eq(issues.companyId, issue.companyId),
+        eq(issues.status, "in_progress"),
+        eq(issues.assigneeAgentId, run.agentId),
+      ))
+      .returning({ id: issues.id })
+      .then((rows) => rows[0] ?? null);
+    if (!reassigned) return false;
+
+    const instruction = [
+      `Finish the remote delivery for ${issue.identifier ?? issue.id}.`,
+      `The implementation already exists in execution workspace ${assessment.executionWorkspaceId} on branch ${assessment.branchName ?? "unknown"}.`,
+      `Persist the missing delivery evidence (${assessment.missingEvidence.join(", ")}) as issue work products and reuse the existing workspace/branch; do not recreate the implementation.`,
+      `Do not mark the issue done until ${assessment.requiredStage} evidence is persisted and verified.`,
+    ].join(" ");
+
+    let handoffRun: typeof heartbeatRuns.$inferSelect | null = null;
+    try {
+      handoffRun = await enqueueWakeup(targetAgent.id, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: FINISH_CODE_DELIVERY_HANDOFF_REASON,
+        idempotencyKey,
+        requestedByActorType: "system",
+        requestedByActorId: "heartbeat",
+        payload: withRecoveryModelProfileHint({
+          issueId: issue.id,
+          taskId: issue.id,
+          projectId: issue.projectId,
+          sourceRunId: run.id,
+          executionWorkspaceId: assessment.executionWorkspaceId,
+          requiredStage: assessment.requiredStage,
+          missingEvidence: assessment.missingEvidence,
+          resumeIntent: true,
+          followUpRequested: true,
+          instruction,
+        }, "normal_model"),
+        contextSnapshot: withRecoveryModelProfileHint({
+          issueId: issue.id,
+          taskId: issue.id,
+          projectId: issue.projectId,
+          sourceRunId: run.id,
+          executionWorkspaceId: assessment.executionWorkspaceId,
+          requiredStage: assessment.requiredStage,
+          missingEvidence: assessment.missingEvidence,
+          resumeIntent: true,
+          followUpRequested: true,
+          wakeReason: FINISH_CODE_DELIVERY_HANDOFF_REASON,
+          instruction,
+        }, "normal_model"),
+      });
+    } catch (error) {
+      logger.warn(
+        { err: error, issueId: issue.id, sourceRunId: run.id, targetAgentId: targetAgent.id },
+        "failed to enqueue code-delivery handoff",
+      );
+    }
+
+    if (!handoffRun) {
+      await db
+        .update(issues)
+        .set({ assigneeAgentId: run.agentId, updatedAt: new Date() })
+        .where(and(
+          eq(issues.id, issue.id),
+          eq(issues.status, "in_progress"),
+          eq(issues.assigneeAgentId, targetAgent.id),
+        ));
+      return false;
+    }
+
+    await addCodeDeliveryHandoffCommentOnce({
+      issueId: issue.id,
+      run,
+      targetAgent,
+      requiredStage: assessment.requiredStage,
+    });
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: "system",
+      actorId: "heartbeat",
+      agentId: targetAgent.id,
+      runId: run.id,
+      action: "issue.code_delivery_handoff_queued",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        sourceAgentId: run.agentId,
+        targetAgentId: targetAgent.id,
+        sourceRunId: run.id,
+        trigger: rejection ? "done_rejected" : "agent_declared_external_delivery_owner",
+        handoffRunId: handoffRun.id,
+        requiredStage: assessment.requiredStage,
+        missingEvidence: assessment.missingEvidence,
+        executionWorkspaceId: assessment.executionWorkspaceId,
+        idempotencyKey,
+      },
+    });
+    return true;
+  }
+
   async function handleSuccessfulRunHandoff(run: typeof heartbeatRuns.$inferSelect, agent: typeof agents.$inferSelect) {
     if (run.status !== "succeeded") return;
     const context = parseObject(run.contextSnapshot);
@@ -17023,17 +17297,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }
         const issueCommentPolicyResult = await finalizeIssueCommentPolicy(livenessRun, agent);
         await releaseIssueExecutionAndPromote(livenessRun);
-        await handleRunLivenessContinuation(livenessRun);
-        await handleIssueReviewPathDisposition(livenessRun);
-        await handleSuccessfulRunHandoff(
-          issueCommentPolicyResult.outcome === "retry_queued" || issueCommentPolicyResult.outcome === "retry_exhausted"
-            ? {
-              ...livenessRun,
-              issueCommentStatus: issueCommentPolicyResult.outcome,
-            }
-            : livenessRun,
-          agent,
-        );
+        const codeDeliveryHandoffQueued = await handleCodeDeliveryDispositionHandoff(livenessRun, agent);
+        if (!codeDeliveryHandoffQueued) {
+          await handleRunLivenessContinuation(livenessRun);
+          await handleIssueReviewPathDisposition(livenessRun);
+          await handleSuccessfulRunHandoff(
+            issueCommentPolicyResult.outcome === "retry_queued" || issueCommentPolicyResult.outcome === "retry_exhausted"
+              ? {
+                ...livenessRun,
+                issueCommentStatus: issueCommentPolicyResult.outcome,
+              }
+              : livenessRun,
+            agent,
+          );
+        }
 
         // Dependency wake re-check: if this run's issue was marked done mid-run,
         // the route-time `issue_blockers_resolved` wake may have been gated by
