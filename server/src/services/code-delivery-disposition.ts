@@ -297,7 +297,10 @@ function hasStructuredPullRequestEvidence(product: DeliveryWorkProduct) {
 }
 
 function hasStructuredMergeEvidence(product: DeliveryWorkProduct) {
-  if (product.type !== "pull_request") return false;
+  // Merge evidence must belong to the same provider-verifiable PR receipt.
+  // Otherwise a structured open PR plus an unrelated, self-declared
+  // type=pull_request/status=merged row could satisfy the cumulative gate.
+  if (!hasStructuredPullRequestEvidence(product)) return false;
   const metadata = readRecord(product.metadata);
   return product.status.toLowerCase() === "merged" ||
     normalizePolicyToken(metadata.state) === "merged" ||
@@ -322,10 +325,19 @@ function isProductionMetadata(metadata: Record<string, unknown>) {
 function hasStructuredProductionDeploymentEvidence(product: DeliveryWorkProduct) {
   if (
     product.type !== "preview_url" &&
-    product.type !== "runtime_service" &&
-    product.type !== "artifact"
+    product.type !== "runtime_service"
   ) return false;
-  if (!isUsableStatus(product.status) || !isHttpUrl(product.url)) return false;
+  // `artifact` with provider=paperclip is the normal contract for uploaded
+  // attachments and promoted low-trust output, not a deployment receipt.
+  // Likewise Paperclip-local runtime services are development processes. A
+  // production receipt must identify an external deployment provider/object.
+  if (
+    product.provider.toLowerCase() === "paperclip" ||
+    !readString(product.provider) ||
+    !readString(product.externalId) ||
+    !isUsableStatus(product.status) ||
+    !isHttpUrl(product.url)
+  ) return false;
   return isProductionMetadata(readRecord(product.metadata));
 }
 

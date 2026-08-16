@@ -99,6 +99,80 @@ describe("code delivery disposition", () => {
     expect(assessment).toMatchObject({ applicable: true, complete: false });
   });
 
+  it("does not combine a structured open PR with an unstructured merged row", () => {
+    const assessment = evaluateCodeDeliveryEvidence({
+      workspace,
+      pullRequestPolicy: { requireMergeBeforeDone: true },
+      workProducts: [
+        product({
+          id: "open-pr",
+          type: "pull_request",
+          provider: "github",
+          externalId: "8421",
+          url: "https://github.com/example/repo/pull/8421",
+          status: "ready_for_review",
+        }),
+        product({
+          id: "self-declared-merge",
+          type: "pull_request",
+          provider: "paperclip",
+          externalId: "local-claim",
+          url: null,
+          status: "merged",
+        }),
+      ],
+    });
+
+    expect(assessment).toMatchObject({
+      applicable: true,
+      complete: false,
+      evidence: { pullRequest: true, merged: false },
+      missingEvidence: ["merged"],
+    });
+  });
+
+  it("does not treat Paperclip artifacts or local runtime services as production receipts", () => {
+    const pullRequest = product({
+      type: "pull_request",
+      provider: "github",
+      externalId: "8421",
+      url: "https://github.com/example/repo/pull/8421",
+      status: "merged",
+    });
+    const assessment = evaluateCodeDeliveryEvidence({
+      workspace,
+      pullRequestPolicy: { requireDeploymentBeforeDone: true },
+      workProducts: [
+        pullRequest,
+        product({
+          id: "attachment",
+          type: "artifact",
+          provider: "paperclip",
+          externalId: "attachment-1",
+          url: "https://app.example.test/api/attachments/1/content",
+          status: "active",
+          metadata: { environment: "production" },
+        }),
+        product({
+          id: "local-runtime",
+          type: "runtime_service",
+          provider: "paperclip",
+          externalId: "runtime-1",
+          url: "https://app.example.test",
+          status: "active",
+          metadata: { environment: "production" },
+        }),
+      ],
+    });
+
+    expect(assessment).toMatchObject({
+      applicable: true,
+      complete: false,
+      evidence: { merged: true, deployed: false },
+      missingEvidence: ["deployed"],
+    });
+  });
+
   it("requires cumulative merge and production evidence for deployed completion", () => {
     const pullRequest = product({
       type: "pull_request",
