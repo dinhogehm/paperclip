@@ -591,6 +591,39 @@ async function runGit(args: string[], cwd: string, opts?: { env?: NodeJS.Process
   return proc.stdout.trim();
 }
 
+async function resolveGitWorktreeAuth(
+  repoRoot: string,
+  baseRef: string | null | undefined,
+  resolveGitAuth?: GitRemoteAuthProvider | null,
+): Promise<GitRemoteAuthInvocation | null> {
+  if (!resolveGitAuth) return null;
+
+  const remoteNames = new Set<string>();
+  const trackedRemote = baseRef ? parseRemoteTrackingRef(baseRef)?.remote : null;
+  if (trackedRemote) remoteNames.add(trackedRemote);
+
+  const partialCloneRemote = await runGit(["config", "--get", "extensions.partialClone"], repoRoot)
+    .then((value) => value.trim())
+    .catch(() => "");
+  if (partialCloneRemote) remoteNames.add(partialCloneRemote);
+
+  const configuredRemotes = await runGit(["remote"], repoRoot)
+    .then((value) => value.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean))
+    .catch(() => [] as string[]);
+  for (const remote of configuredRemotes) remoteNames.add(remote);
+
+  for (const remote of remoteNames) {
+    const remoteUrl = await runGit(["remote", "get-url", remote], repoRoot)
+      .then((value) => value.trim())
+      .catch(() => "");
+    if (!remoteUrl) continue;
+    const auth = await resolveGitAuth(remoteUrl).catch(() => null);
+    if (auth) return auth;
+  }
+
+  return null;
+}
+
 function formatShortSha(value: string | null | undefined) {
   return value ? value.slice(0, 12) : "unknown";
 }
@@ -2505,10 +2538,25 @@ async function recordGitOperation(
     metadata?: Record<string, unknown> | null;
     successMessage?: string | null;
     failureLabel?: string | null;
+    auth?: GitRemoteAuthInvocation | null;
   },
 ): Promise<string> {
+  const args = [...(input.auth?.configArgs ?? []), ...input.args];
+  const env = input.auth ? { ...process.env, ...input.auth.env } : undefined;
+  const sensitiveAuthValues = Object.entries(input.auth?.env ?? {})
+    .filter(([key, value]) => /(?:token|secret|password|credential|api[_-]?key)/i.test(key) && value.length > 0)
+    .map(([, value]) => value);
+  const redactAuthValues = (value: string) => sensitiveAuthValues.reduce(
+    (redacted, sensitiveValue) => redacted.split(sensitiveValue).join("[REDACTED]"),
+    value,
+  );
   if (!recorder) {
-    return runGit(input.args, input.cwd);
+    try {
+      return await runGit(args, input.cwd, env ? { env } : undefined);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(redactAuthValues(message));
+    }
   }
 
   let stdout = "";
@@ -2522,17 +2570,18 @@ async function recordGitOperation(
     run: async () => {
       const result = await executeProcess({
         command: "git",
-        args: input.args,
+        args,
         cwd: input.cwd,
+        env,
       });
-      stdout = result.stdout;
-      stderr = result.stderr;
+      stdout = redactAuthValues(result.stdout);
+      stderr = redactAuthValues(result.stderr);
       code = result.code;
       return {
         status: result.code === 0 ? "succeeded" : "failed",
         exitCode: result.code,
-        stdout: result.stdout,
-        stderr: result.stderr,
+        stdout,
+        stderr,
         system: result.code === 0 ? input.successMessage ?? null : null,
         metadata:
           result.stdoutTruncated || result.stderrTruncated
@@ -2902,6 +2951,10 @@ export async function realizeExecutionWorkspace(input: {
     throw new Error(`Registered worktree for branch "${branchName}" at "${registeredBranchWorktree}" is not reusable${reason}.`);
   }
 
+  // `git worktree add` can perform an implicit lazy fetch when the base checkout is a
+  // partial/promisor clone. Reuse the same credential provider as the explicit base-ref
+  // refresh so that private GitHub repositories do not lose authentication at this boundary.
+  const worktreeGitAuth = await resolveGitWorktreeAuth(repoRoot, baseRef, input.resolveGitAuth);
   try {
     await recordGitOperation(input.recorder, {
       phase: "worktree_prepare",
@@ -2917,6 +2970,7 @@ export async function realizeExecutionWorkspace(input: {
       },
       successMessage: `Created git worktree at ${worktreePath}\n`,
       failureLabel: `git worktree add ${worktreePath}`,
+      auth: worktreeGitAuth,
     });
   } catch (error) {
     if (!gitErrorIncludes(error, "already exists")) {
@@ -2938,6 +2992,7 @@ export async function realizeExecutionWorkspace(input: {
         },
         successMessage: `Attached existing branch ${branchName} at ${worktreePath}\n`,
         failureLabel: `git worktree add ${worktreePath}`,
+        auth: worktreeGitAuth,
       });
     } catch (attachError) {
       if (!gitErrorIncludes(attachError, "already checked out")) {
@@ -3135,6 +3190,9 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
     : [];
   const restoreCurrentBaseRefSha = restoreBaseRef ? await resolveBaseRefSha(repoRoot, restoreBaseRef) : null;
 
+  // Reattaching or recreating a missing worktree can also hydrate omitted promisor objects.
+  // Keep the credential in the child environment and out of argv/recorded command text.
+  const worktreeGitAuth = await resolveGitWorktreeAuth(repoRoot, restoreBaseRef, input.resolveGitAuth);
   let created = false;
   try {
     await recordGitOperation(input.recorder, {
@@ -3152,6 +3210,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
       },
       successMessage: `Reattached missing git worktree at ${worktreePath}\n`,
       failureLabel: `git worktree add ${worktreePath}`,
+      auth: worktreeGitAuth,
     });
   } catch (error) {
     if (
@@ -3178,6 +3237,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
       },
       successMessage: `Recreated missing git worktree at ${worktreePath}\n`,
       failureLabel: `git worktree add ${worktreePath}`,
+      auth: worktreeGitAuth,
     });
     created = true;
   }

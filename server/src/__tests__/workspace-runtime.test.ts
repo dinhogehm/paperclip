@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { parse as parseEnvContents } from "dotenv";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -226,6 +226,46 @@ async function createClonedRepoWithRemote() {
   await runGit(repoRoot, ["config", "user.email", "paperclip@example.com"]);
   await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
   return { sourceRepo, remotePath, repoRoot };
+}
+
+async function createPromisorCloneWithCredentialGate() {
+  const sourceRepo = await createTempRepo("master");
+  await fs.writeFile(path.join(sourceRepo, "lazy-fetch.txt"), "hydrated through promisor remote\n", "utf8");
+  await runGit(sourceRepo, ["add", "lazy-fetch.txt"]);
+  await runGit(sourceRepo, ["commit", "-m", "Add lazy fetched blob"]);
+  const lazyBlobSha = await readGit(sourceRepo, ["rev-parse", "master:lazy-fetch.txt"]);
+
+  const remoteDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-worktree-promisor-remote-"));
+  const remotePath = path.join(remoteDir, "paperclip.git");
+  await execFileAsync("git", ["clone", "--bare", sourceRepo, remotePath]);
+  await runGit(remotePath, ["config", "uploadpack.allowFilter", "true"]);
+
+  const cloneRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-worktree-promisor-clone-"));
+  const repoRoot = path.join(cloneRoot, "paperclip");
+  const remoteUrl = pathToFileURL(remotePath).href;
+  await execFileAsync("git", ["clone", "--filter=blob:none", "--no-checkout", remoteUrl, repoRoot]);
+  await runGit(repoRoot, ["config", "user.email", "paperclip@example.com"]);
+  await runGit(repoRoot, ["config", "user.name", "Paperclip Test"]);
+
+  const credentialToken = `worktree-secret-${randomUUID()}`;
+  const uploadPackGate = path.join(remoteDir, "credentialed-upload-pack.sh");
+  await fs.writeFile(
+    uploadPackGate,
+    [
+      "#!/bin/sh",
+      `if [ "\${PAPERCLIP_GIT_TOKEN:-}" != "${credentialToken}" ]; then`,
+      "  echo 'missing Paperclip git credential' >&2",
+      "  exit 86",
+      "fi",
+      "echo \"credential=$PAPERCLIP_GIT_TOKEN\" >&2",
+      "exec git-upload-pack \"$@\"",
+      "",
+    ].join("\n"),
+    { encoding: "utf8", mode: 0o700 },
+  );
+  await runGit(repoRoot, ["config", "remote.origin.uploadpack", uploadPackGate]);
+
+  return { credentialToken, lazyBlobSha, remoteUrl, repoRoot };
 }
 
 async function advanceRemoteMaster(sourceRepo: string, remotePath: string, fileName: string) {
@@ -563,6 +603,67 @@ describe("ensureServerWorkspaceLinksCurrent", () => {
 });
 
 describe("realizeExecutionWorkspace", () => {
+  it("propagates remote auth through worktree-add lazy fetches without recording the token", async () => {
+    const { credentialToken, lazyBlobSha, remoteUrl, repoRoot } = await createPromisorCloneWithCredentialGate();
+    const missingBefore = await execFileAsync(
+      "git",
+      ["rev-list", "--objects", "--all", "--missing=print"],
+      { cwd: repoRoot, env: { ...process.env, GIT_NO_LAZY_FETCH: "1" } },
+    );
+    expect(missingBefore.stdout).toContain(`?${lazyBlobSha}`);
+
+    const { recorder, operations } = createWorkspaceOperationRecorderDouble();
+    const offeredUrls: string[] = [];
+    const workspace = await realizeExecutionWorkspace({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: remoteUrl,
+        repoRef: "origin/master",
+      },
+      config: {
+        workspaceStrategy: {
+          type: "git_worktree",
+          branchTemplate: "{{issue.identifier}}-{{slug}}",
+          baseRef: "origin/master",
+        },
+      },
+      issue: {
+        id: "issue-promisor-auth",
+        identifier: "PAP-999",
+        title: "Hydrate a private partial clone",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+      recorder,
+      resolveGitAuth: async (offeredUrl) => {
+        offeredUrls.push(offeredUrl);
+        return {
+          configArgs: [],
+          env: { PAPERCLIP_GIT_TOKEN: credentialToken, GIT_TERMINAL_PROMPT: "0" },
+          source: "company_secret",
+          secretName: "GH_TOKEN",
+        };
+      },
+    });
+
+    expect(workspace.created).toBe(true);
+    await expect(fs.readFile(path.join(workspace.cwd, "lazy-fetch.txt"), "utf8"))
+      .resolves.toBe("hydrated through promisor remote\n");
+    expect(offeredUrls.filter((url) => url === remoteUrl).length).toBeGreaterThanOrEqual(2);
+
+    const recorded = JSON.stringify(operations);
+    expect(recorded).not.toContain(credentialToken);
+    expect(recorded).toContain("[REDACTED]");
+    expect(operations.find((operation) => operation.phase === "worktree_prepare")?.command)
+      .toContain("git worktree add");
+  }, 15_000);
+
   it("defaults new git worktrees to freshly fetched origin/master", async () => {
     const sourceRepo = await createTempRepo("master");
     const remoteDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-worktree-remote-"));
@@ -2358,6 +2459,65 @@ describe("realizeExecutionWorkspace", () => {
     await expect(fs.readFile(path.join(initial.cwd, ".paperclip-restored-branch"), "utf8")).resolves.toBe(`${branchName}\n`);
     const actualHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: initial.cwd })).stdout.trim();
     expect(actualHead).toBe(expectedHead);
+  }, 15_000);
+
+  it("propagates remote auth when restoring a persisted promisor worktree", async () => {
+    const { credentialToken, remoteUrl, repoRoot } = await createPromisorCloneWithCredentialGate();
+    const branchName = "PAP-1000-restore-private-promisor-worktree";
+    const worktreePath = path.join(repoRoot, ".paperclip", "worktrees", branchName);
+    await runGit(repoRoot, ["branch", branchName, "origin/master"]);
+    const { recorder, operations } = createWorkspaceOperationRecorderDouble();
+    const offeredUrls: string[] = [];
+
+    const restored = await ensurePersistedExecutionWorkspaceAvailable({
+      base: {
+        baseCwd: repoRoot,
+        source: "project_primary",
+        projectId: "project-1",
+        workspaceId: "workspace-1",
+        repoUrl: remoteUrl,
+        repoRef: "origin/master",
+      },
+      workspace: {
+        id: "execution-workspace-promisor-restore",
+        mode: "isolated_workspace",
+        strategyType: "git_worktree",
+        cwd: worktreePath,
+        providerRef: worktreePath,
+        projectId: "project-1",
+        projectWorkspaceId: "workspace-1",
+        repoUrl: remoteUrl,
+        baseRef: "origin/master",
+        branchName,
+      },
+      issue: {
+        id: "issue-promisor-restore",
+        identifier: "PAP-1000",
+        title: "Restore a private partial clone",
+      },
+      agent: {
+        id: "agent-1",
+        name: "Codex Coder",
+        companyId: "company-1",
+      },
+      recorder,
+      resolveGitAuth: async (offeredUrl) => {
+        offeredUrls.push(offeredUrl);
+        return {
+          configArgs: [],
+          env: { PAPERCLIP_GIT_TOKEN: credentialToken, GIT_TERMINAL_PROMPT: "0" },
+          source: "company_secret",
+          secretName: "GH_TOKEN",
+        };
+      },
+    });
+
+    expect(restored?.cwd).toBe(worktreePath);
+    await expect(fs.readFile(path.join(worktreePath, "lazy-fetch.txt"), "utf8"))
+      .resolves.toBe("hydrated through promisor remote\n");
+    expect(offeredUrls.filter((url) => url === remoteUrl).length).toBeGreaterThanOrEqual(2);
+    expect(JSON.stringify(operations)).not.toContain(credentialToken);
+    expect(JSON.stringify(operations)).toContain("[REDACTED]");
   }, 15_000);
 
   it("repairs a clean persisted git worktree branch mismatch when both branches point at the same commit", async () => {
