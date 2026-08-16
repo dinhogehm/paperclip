@@ -2335,55 +2335,84 @@ export function refreshPaperclipWorkspaceEnvForExecution(input: {
   return shapedWorkspaceEnv;
 }
 
-const HOST_CONTROL_PLANE_ENV_KEYS = new Set([
-  "DATABASE_URL",
-  "DATABASE_MIGRATION_URL",
-  "HOST",
-  "NODE_ENV",
-  "NODE_OPTIONS",
-  "NODE_PATH",
-  "NOTIFY_SOCKET",
-  "PORT",
-  "SERVE_UI",
-  "TRUST_PROXY",
-  "WORKSPACE_OPERATION_LOG_BASE_PATH",
-  "npm_config_authenticated_private",
-  "npm_config_tailscale_auth",
-]);
-
-const HOST_CONTROL_PLANE_ENV_PREFIXES = [
-  "BETTER_AUTH_",
-  "HEARTBEAT_SCHEDULER_",
-  "OTEL_",
-  "PAPERCLIP_",
-  "RAILWAY_",
-  "RUN_LOG_",
-] as const;
-
-const INHERITED_PROVIDER_CREDENTIAL_ENV_KEYS = new Set([
-  "RAILWAY_API_TOKEN",
-  "RAILWAY_TOKEN",
+const INHERITED_WORKLOAD_ENV_KEYS = new Set([
+  // Shell and platform state required to resolve tools and user-local installs.
+  "PATH",
+  "PATHEXT",
+  "HOME",
+  "USER",
+  "USERNAME",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "LOGNAME",
+  "SHELL",
+  "SYSTEMROOT",
+  "COMSPEC",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  // Locale, terminal, and non-secret network trust configuration.
+  "LANG",
+  "LANGUAGE",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LC_MESSAGES",
+  "LC_COLLATE",
+  "LC_NUMERIC",
+  "LC_TIME",
+  "LC_MONETARY",
+  "LC_PAPER",
+  "LC_MEASUREMENT",
+  "LC_NAME",
+  "LC_ADDRESS",
+  "LC_TELEPHONE",
+  "LC_IDENTIFICATION",
+  "TERM",
+  "TERM_PROGRAM",
+  "COLORTERM",
+  "NO_COLOR",
+  "FORCE_COLOR",
+  "NO_PROXY",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "NODE_EXTRA_CA_CERTS",
+  // User-local tool/cache roots. Authentication-specific homes such as
+  // CODEX_HOME, CLAUDE_CONFIG_DIR, DOCKER_CONFIG, and SSH_AUTH_SOCK are
+  // deliberately excluded and must be supplied by an explicit overlay.
+  "XDG_CONFIG_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "XDG_RUNTIME_DIR",
+  "NVM_DIR",
+  "PNPM_HOME",
+  "VOLTA_HOME",
+  "BUN_INSTALL",
+  "CARGO_HOME",
+  "RUSTUP_HOME",
+  "GOPATH",
+  "PYENV_ROOT",
+  "RBENV_ROOT",
+  "SDKMAN_DIR",
 ]);
 
 /**
- * Remove settings that belong to the Paperclip control plane before crossing
- * the host -> workspace/agent process boundary. Provider credentials and
- * ordinary shell state intentionally remain available for backwards
- * compatibility; an explicit adapter/project env overlay is applied after
- * this sanitizer by every caller and may therefore opt a workload back into a
- * key such as NODE_ENV.
+ * Select only non-secret shell/tool state before crossing the host ->
+ * workspace/agent process boundary. Everything else (including provider
+ * credentials and control-plane configuration) is fail-closed and must be
+ * supplied by an explicit adapter/project env overlay.
  */
 export function sanitizeInheritedControlPlaneEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...baseEnv };
-  delete env.PAPERCLIPAI_CMD;
-  for (const key of Object.keys(env)) {
-    if (INHERITED_PROVIDER_CREDENTIAL_ENV_KEYS.has(key)) continue;
-    if (
-      HOST_CONTROL_PLANE_ENV_KEYS.has(key)
-      || HOST_CONTROL_PLANE_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))
-    ) {
-      delete env[key];
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    const normalizedKey = key.toUpperCase();
+    if (!INHERITED_WORKLOAD_ENV_KEYS.has(normalizedKey)) {
+      continue;
     }
+    env[key] = value;
   }
   return env;
 }
@@ -2558,12 +2587,21 @@ export function ensurePathInEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 export function buildWorkloadProcessEnv(
   explicitEnv: NodeJS.ProcessEnv,
   inheritedEnv: NodeJS.ProcessEnv = process.env,
+  platform: string = process.platform,
 ): Record<string, string> {
+  const merged = sanitizeInheritedControlPlaneEnv(inheritedEnv);
+  for (const [key, value] of Object.entries(explicitEnv)) {
+    if (platform === "win32") {
+      const normalizedKey = key.toUpperCase();
+      for (const inheritedKey of Object.keys(merged)) {
+        if (inheritedKey.toUpperCase() === normalizedKey) delete merged[inheritedKey];
+      }
+    }
+    merged[key] = value;
+  }
   return Object.fromEntries(
-    Object.entries(ensurePathInEnv({
-      ...sanitizeInheritedControlPlaneEnv(inheritedEnv),
-      ...explicitEnv,
-    })).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    Object.entries(ensurePathInEnv(merged))
+      .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
   );
 }
 

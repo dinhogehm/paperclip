@@ -425,7 +425,7 @@ describe("sanitizeRuntimeServiceBaseEnv", () => {
     expect(sanitized.npm_config_tailscale_auth).toBeUndefined();
     expect(sanitized.npm_config_authenticated_private).toBeUndefined();
     expect(sanitized.HOST).toBeUndefined();
-    expect(sanitized.OPENAI_API_KEY).toBe("sk-workload");
+    expect(sanitized.OPENAI_API_KEY).toBeUndefined();
   });
 });
 
@@ -1344,7 +1344,7 @@ describe("realizeExecutionWorkspace", () => {
     await expect(fs.readFile(path.join(reused.cwd, ".paperclip-provision-created"), "utf8")).resolves.toBe("false\n");
   });
 
-  it("does not leak the server production or database environment into worktree provisioning", async () => {
+  it("isolates host secrets while forwarding explicit bindings and managed worktree state to provisioning", async () => {
     const repoRoot = await createTempRepo();
     await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
     await fs.writeFile(
@@ -1354,8 +1354,13 @@ describe("realizeExecutionWorkspace", () => {
         "fs.writeFileSync('.paperclip-provision-env.json', JSON.stringify({",
         "  nodeEnv: process.env.NODE_ENV ?? null,",
         "  databaseUrl: process.env.DATABASE_URL ?? null,",
+        "  githubToken: process.env.GITHUB_TOKEN ?? null,",
+        "  anthropicKey: process.env.ANTHROPIC_API_KEY ?? null,",
         "  paperclipHome: process.env.PAPERCLIP_HOME ?? null,",
+        "  worktreesDir: process.env.PAPERCLIP_WORKTREES_DIR ?? null,",
+        "  projectFlag: process.env.PROJECT_FLAG ?? null,",
         "  workspaceBranch: process.env.PAPERCLIP_WORKSPACE_BRANCH ?? null,",
+        "  lowercaseWorkspaceBranch: process.env.paperclip_workspace_branch ?? null,",
         "}));",
       ].join("\n"),
       "utf8",
@@ -1366,9 +1371,15 @@ describe("realizeExecutionWorkspace", () => {
     const previousNodeEnv = process.env.NODE_ENV;
     const previousDatabaseUrl = process.env.DATABASE_URL;
     const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousGithubToken = process.env.GITHUB_TOKEN;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
+    const previousWorktreesDir = process.env.PAPERCLIP_WORKTREES_DIR;
     process.env.NODE_ENV = "production";
     process.env.DATABASE_URL = "postgres://paperclip.test/control-plane";
     process.env.PAPERCLIP_HOME = "/srv/paperclip";
+    process.env.GITHUB_TOKEN = "github-host-secret";
+    process.env.ANTHROPIC_API_KEY = "anthropic-host-secret";
+    process.env.PAPERCLIP_WORKTREES_DIR = "/srv/paperclip/worktrees";
 
     try {
       const workspace = await realizeExecutionWorkspace({
@@ -1397,16 +1408,28 @@ describe("realizeExecutionWorkspace", () => {
           name: "Codex Coder",
           companyId: "company-1",
         },
+        provisionEnv: {
+          NODE_ENV: "test",
+          DATABASE_URL: "postgres://workspace.test/app",
+          GITHUB_TOKEN: "github-explicit-binding",
+          PROJECT_FLAG: "bound",
+          paperclip_workspace_branch: "config-must-not-override-managed-state",
+        },
       });
 
       await expect(
         fs.readFile(path.join(workspace.cwd, ".paperclip-provision-env.json"), "utf8")
           .then((contents) => JSON.parse(contents)),
       ).resolves.toEqual({
-        nodeEnv: null,
-        databaseUrl: null,
+        nodeEnv: "test",
+        databaseUrl: "postgres://workspace.test/app",
+        githubToken: "github-explicit-binding",
+        anthropicKey: null,
         paperclipHome: null,
+        worktreesDir: "/srv/paperclip/worktrees",
+        projectFlag: "bound",
         workspaceBranch: "PAP-3030-isolate-provision-environment",
+        lowercaseWorkspaceBranch: null,
       });
     } finally {
       if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
@@ -1415,6 +1438,12 @@ describe("realizeExecutionWorkspace", () => {
       else process.env.DATABASE_URL = previousDatabaseUrl;
       if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
       else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previousGithubToken;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
+      if (previousWorktreesDir === undefined) delete process.env.PAPERCLIP_WORKTREES_DIR;
+      else process.env.PAPERCLIP_WORKTREES_DIR = previousWorktreesDir;
     }
   });
 
@@ -3294,6 +3323,7 @@ describe("realizeExecutionWorkspace", () => {
         "#!/usr/bin/env bash",
         "set -euo pipefail",
         "printf 'reprovisioned\\n' > .paperclip-restored-state",
+        "printf '%s\\n' \"${PROJECT_FLAG:-}\" > .paperclip-restored-project-env",
       ].join("\n"),
       "utf8",
     );
@@ -3364,9 +3394,14 @@ describe("realizeExecutionWorkspace", () => {
         name: "Codex Coder",
         companyId: "company-1",
       },
+      provisionEnv: {
+        PROJECT_FLAG: "restored-explicit-binding",
+      },
     });
 
     await expect(fs.readFile(path.join(initial.cwd, ".paperclip-restored-state"), "utf8")).resolves.toBe("reprovisioned\n");
+    await expect(fs.readFile(path.join(initial.cwd, ".paperclip-restored-project-env"), "utf8"))
+      .resolves.toBe("restored-explicit-binding\n");
   }, 15_000);
 
   it("auto-detects the default branch when baseRef is not configured", async () => {
@@ -3871,13 +3906,19 @@ describe("ensureRuntimeServicesForRun", () => {
     const capturePath = path.join(workspaceRoot, "runtime-provision-env.json");
     const previousNodeEnv = process.env.NODE_ENV;
     const previousDatabaseUrl = process.env.DATABASE_URL;
+    const previousGithubToken = process.env.GITHUB_TOKEN;
+    const previousWorktreesDir = process.env.PAPERCLIP_WORKTREES_DIR;
     process.env.NODE_ENV = "production";
     process.env.DATABASE_URL = "postgres://paperclip.test/control-plane";
+    process.env.GITHUB_TOKEN = "github-host-secret";
+    process.env.PAPERCLIP_WORKTREES_DIR = "/srv/paperclip/worktrees";
     const provisionScript = [
       "const fs = require('node:fs');",
       `fs.writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({`,
       "  nodeEnv: process.env.NODE_ENV ?? null,",
       "  databaseUrl: process.env.DATABASE_URL ?? null,",
+      "  githubToken: process.env.GITHUB_TOKEN ?? null,",
+      "  worktreesDir: process.env.PAPERCLIP_WORKTREES_DIR ?? null,",
       "  agentId: process.env.PAPERCLIP_AGENT_ID ?? null,",
       "}));",
     ].join(" ");
@@ -3899,6 +3940,8 @@ describe("ensureRuntimeServicesForRun", () => {
       await expect(fs.readFile(capturePath, "utf8").then((contents) => JSON.parse(contents))).resolves.toEqual({
         nodeEnv: "test",
         databaseUrl: "postgres://workspace.test/app",
+        githubToken: null,
+        worktreesDir: null,
         agentId: "agent-1",
       });
     } finally {
@@ -3912,6 +3955,10 @@ describe("ensureRuntimeServicesForRun", () => {
       else process.env.NODE_ENV = previousNodeEnv;
       if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = previousDatabaseUrl;
+      if (previousGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previousGithubToken;
+      if (previousWorktreesDir === undefined) delete process.env.PAPERCLIP_WORKTREES_DIR;
+      else process.env.PAPERCLIP_WORKTREES_DIR = previousWorktreesDir;
     }
   });
 

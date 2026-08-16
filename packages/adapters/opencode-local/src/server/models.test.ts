@@ -1,5 +1,30 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const runChildProcessMock = vi.hoisted(() => vi.fn(async (
+  _runId: string,
+  command: string,
+  _args: string[],
+  _options: unknown,
+) => {
+  if (command.includes("__paperclip_missing_")) throw new Error("command unavailable");
+  return {
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    stdout: "",
+    stderr: "",
+    pid: 123,
+    startedAt: new Date().toISOString(),
+  };
+}));
+
+vi.mock("@paperclipai/adapter-utils/server-utils", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@paperclipai/adapter-utils/server-utils")>();
+  return { ...actual, runChildProcess: runChildProcessMock };
+});
+
 import {
+  discoverOpenCodeModels,
   ensureOpenCodeModelConfiguredAndAvailable,
   listOpenCodeModels,
   requireOpenCodeModelId,
@@ -10,7 +35,37 @@ describe("openCode models", () => {
   afterEach(() => {
     delete process.env.PAPERCLIP_OPENCODE_COMMAND;
     delete process.env.OPENCODE_ALLOW_ALL_MODELS;
+    vi.clearAllMocks();
     resetOpenCodeModelsCacheForTests();
+  });
+
+  it("keeps host credentials out of model probes while preserving explicit bindings", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousGithubToken = process.env.GITHUB_TOKEN;
+    process.env.NODE_ENV = "production";
+    process.env.GITHUB_TOKEN = "github-host-secret";
+
+    try {
+      await discoverOpenCodeModels({
+        command: "opencode-fixture",
+        env: {
+          HOME: "/workspace/managed-home",
+          NODE_ENV: "test",
+          ANTHROPIC_API_KEY: "anthropic-explicit-binding",
+        },
+      });
+
+      const options = runChildProcessMock.mock.calls.at(-1)?.[3] as { env: Record<string, string> } | undefined;
+      expect(options?.env.HOME).toBe("/workspace/managed-home");
+      expect(options?.env.NODE_ENV).toBe("test");
+      expect(options?.env.ANTHROPIC_API_KEY).toBe("anthropic-explicit-binding");
+      expect(options?.env.GITHUB_TOKEN).toBeUndefined();
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previousGithubToken;
+    }
   });
 
   it("returns an empty list when discovery command is unavailable", async () => {

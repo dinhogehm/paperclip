@@ -157,7 +157,10 @@ describe("grok_local execute", () => {
       stderr: "",
     }));
 
-    const makeCtx = async (runId: string): Promise<AdapterExecutionContext> => ({
+    const makeCtx = async (
+      runId: string,
+      env: Record<string, string> = {},
+    ): Promise<AdapterExecutionContext> => ({
       runId,
       agent: {
         id: "agent-1",
@@ -167,7 +170,7 @@ describe("grok_local execute", () => {
         adapterConfig: {},
       },
       runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
-      config: { cwd: await makeTempRoot() },
+      config: { cwd: await makeTempRoot(), env },
       context: {},
       authToken: "run-token",
       onLog: async () => {},
@@ -189,8 +192,7 @@ describe("grok_local execute", () => {
       });
 
       // API-key billing: same token usage, plus the real dollar cost.
-      process.env.XAI_API_KEY = "test-key";
-      const apiResult = await execute(await makeCtx("run-api"));
+      const apiResult = await execute(await makeCtx("run-api", { XAI_API_KEY: "test-key" }));
       expect(apiResult).toMatchObject({
         usage: { inputTokens: 2384, outputTokens: 261, cachedInputTokens: 23040 },
         usageBasis: "per_run",

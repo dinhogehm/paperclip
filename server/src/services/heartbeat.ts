@@ -15696,6 +15696,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         materializationFailures: resolvedWorkspace.materializationFailures,
       },
     });
+    // Resolve the explicit workload env before workspace materialization so a
+    // repo-managed provision command sees the same project/routine/agent
+    // bindings as the adapter. Host process.env is sanitized separately at
+    // the spawn boundary and is never used as a credential source here.
+    const adapterEnv = Object.fromEntries(
+      Object.entries(parseObject(resolvedConfig.env)).filter(
+        (entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string",
+      ),
+    );
     const workspaceStrategyForFingerprint = parseObject(hostExecutionWorkspaceConfig.workspaceStrategy);
     const workspaceStrategyFingerprintValue =
       Object.keys(workspaceStrategyForFingerprint).length > 0 ? workspaceStrategyForFingerprint : null;
@@ -15828,6 +15837,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 companyId: agent.companyId,
               },
               heartbeatRunId: run.id,
+              provisionEnv: adapterEnv,
               enableWorkspaceBranchReconcileForward:
                 resolvedInstanceSettings.experimental.enableWorkspaceBranchReconcileForward,
               enableWorkspaceDirtyQuarantineRepair:
@@ -15847,6 +15857,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             companyId: agent.companyId,
           },
           heartbeatRunId: run.id,
+          provisionEnv: adapterEnv,
           enableWorkspaceBranchReconcileForward:
             resolvedInstanceSettings.experimental.enableWorkspaceBranchReconcileForward,
           enableWorkspaceDirtyQuarantineRepair:
@@ -16595,11 +16606,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           : null,
         cwd: executionWorkspace.cwd,
       });
-      const adapterEnv = Object.fromEntries(
-        Object.entries(parseObject(resolvedConfig.env)).filter(
-          (entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string",
-        ),
-      );
       const runtimeServices = await ensureRuntimeServicesForRun({
         db,
         runId: run.id,

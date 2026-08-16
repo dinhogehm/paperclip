@@ -7,7 +7,7 @@ import {
   asNumber,
   asString,
   asStringArray,
-  ensurePathInEnv,
+  buildWorkloadProcessEnv,
   parseObject,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
@@ -143,7 +143,7 @@ export async function testEnvironment(
   }
 
   const env = normalizeEnv(config.env);
-  const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  const runtimeEnv = buildWorkloadProcessEnv(env);
 
   try {
     await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, runtimeEnv);

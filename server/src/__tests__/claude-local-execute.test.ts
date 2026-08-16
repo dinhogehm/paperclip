@@ -807,7 +807,7 @@ describe("claude execute", () => {
     const previousClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
     process.env.HOME = root;
     process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
-    process.env.CLAUDE_CONFIG_DIR = claudeConfigDir;
+    process.env.CLAUDE_CONFIG_DIR = path.join(root, "host-claude-config-must-not-leak");
 
     let loggedCommand: string | null = null;
     let loggedEnv: Record<string, string> = {};
@@ -833,6 +833,7 @@ describe("claude execute", () => {
           cwd: workspace,
           env: {
             PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+            CLAUDE_CONFIG_DIR: claudeConfigDir,
           },
           promptTemplate: "Follow the paperclip heartbeat.",
         },

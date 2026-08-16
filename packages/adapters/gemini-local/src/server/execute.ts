@@ -31,10 +31,10 @@ import {
   asStringArray,
   buildPaperclipEnv,
   buildInvocationEnvForLogs,
+  buildWorkloadProcessEnv,
   ensureAbsoluteDirectory,
   ensurePaperclipSkillSymlink,
   joinPromptSections,
-  ensurePathInEnv,
   refreshPaperclipWorkspaceEnvForExecution,
   readPaperclipRuntimeSkillEntries,
   readPaperclipIssueWorkModeFromContext,
@@ -93,11 +93,7 @@ function buildGeminiHeadlessEnv(env: Record<string, string>): Record<string, str
 }
 
 function buildGeminiRuntimeEnv(env: Record<string, string>): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(ensurePathInEnv({ ...process.env, ...buildGeminiHeadlessEnv(env) })).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string",
-    ),
-  );
+  return buildWorkloadProcessEnv(buildGeminiHeadlessEnv(env));
 }
 
 function renderPaperclipEnvNote(env: Record<string, string>): string {
