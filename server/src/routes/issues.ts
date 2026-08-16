@@ -869,6 +869,55 @@ async function listSuccessfulRunHandoffStates(
     : hydrateSuccessfulRunHandoffLiveness(db, companyId, states);
 }
 
+async function resolveSuccessfulRunHandoffOnExplicitDisposition(
+  db: Db,
+  input: {
+    companyId: string;
+    issueId: string;
+    issueIdentifier: string | null;
+    actorType: "agent" | "user" | "system" | "plugin";
+    actorId: string;
+    agentId: string | null;
+    runId: string | null;
+    agentApiKeyId: string | null;
+    resolvedByStatus: string;
+    resolutionSource: "issue_status_transition" | "recovery_action_resolution";
+    recoveryActionId?: string | null;
+    recoveryOutcome?: string | null;
+  },
+) {
+  const handoff = await listSuccessfulRunHandoffStates(
+    db,
+    input.companyId,
+    [input.issueId],
+    { hydrateLiveness: false },
+  ).then((states) => states.get(input.issueId));
+  if (handoff?.state !== "required" && handoff?.state !== "escalated") return false;
+
+  await logActivity(db, {
+    companyId: input.companyId,
+    actorType: input.actorType,
+    actorId: input.actorId,
+    agentId: input.agentId,
+    runId: input.runId,
+    agentApiKeyId: input.agentApiKeyId,
+    action: "issue.successful_run_handoff_resolved",
+    entityType: "issue",
+    entityId: input.issueId,
+    details: {
+      identifier: input.issueIdentifier,
+      sourceRunId: handoff.sourceRunId,
+      correctiveRunId: handoff.correctiveRunId,
+      previousHandoffState: handoff.state,
+      resolvedByStatus: input.resolvedByStatus,
+      resolutionSource: input.resolutionSource,
+      ...(input.recoveryActionId ? { recoveryActionId: input.recoveryActionId } : {}),
+      ...(input.recoveryOutcome ? { recoveryOutcome: input.recoveryOutcome } : {}),
+    },
+  });
+  return true;
+}
+
 type RecoveryActionsLister = {
   listActiveForIssues: (
     companyId: string,
@@ -6524,6 +6573,26 @@ export function issueRoutes(
       },
     });
 
+    await resolveSuccessfulRunHandoffOnExplicitDisposition(db, {
+      companyId: result.issue.companyId,
+      issueId: result.issue.id,
+      issueIdentifier: result.issue.identifier,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      agentApiKeyId: actor.agentApiKeyId,
+      resolvedByStatus: result.issue.status,
+      resolutionSource: "recovery_action_resolution",
+      recoveryActionId: result.recoveryAction.id,
+      recoveryOutcome: result.recoveryAction.outcome,
+    }).catch((err) => {
+      logger.warn(
+        { err, issueId: result.issue.id, recoveryActionId: result.recoveryAction.id },
+        "failed to reconcile successful run handoff after recovery action resolution",
+      );
+    });
+
     if (
       sourceIssueStatus === "todo" &&
       result.issue.assigneeAgentId &&
@@ -9523,29 +9592,19 @@ export function issueRoutes(
       },
     });
 
-    if (existing.status === "in_progress" && issue.status !== existing.status && issue.status !== "in_progress") {
-      await listSuccessfulRunHandoffStates(db, issue.companyId, [issue.id], { hydrateLiveness: false })
-        .then(async (handoffStates) => {
-          const handoff = handoffStates.get(issue.id);
-          if (handoff?.state !== "required") return;
-          await logActivity(db, {
-            companyId: issue.companyId,
-            actorType: actor.actorType,
-            actorId: actor.actorId,
-            agentId: actor.agentId,
-            runId: actor.runId,
-            agentApiKeyId: actor.agentApiKeyId,
-            action: "issue.successful_run_handoff_resolved",
-            entityType: "issue",
-            entityId: issue.id,
-            details: {
-              identifier: issue.identifier,
-              sourceRunId: handoff.sourceRunId,
-              correctiveRunId: handoff.correctiveRunId,
-              resolvedByStatus: issue.status,
-            },
-          });
-        })
+    if (issue.status !== existing.status && issue.status !== "in_progress") {
+      await resolveSuccessfulRunHandoffOnExplicitDisposition(db, {
+        companyId: issue.companyId,
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
+        resolvedByStatus: issue.status,
+        resolutionSource: "issue_status_transition",
+      })
         .catch((err) => {
           logger.warn({ err, issueId: issue.id }, "failed to log successful run handoff resolution");
         });

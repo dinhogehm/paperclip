@@ -1408,6 +1408,64 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     );
   });
 
+  it("reconciles an escalated successful-run handoff when its recovery action is explicitly resolved", async () => {
+    const { companyId, managerId, coderId, sourceIssueId } = await seedCompany();
+    const sourceRunId = randomUUID();
+    const correctiveRunId = randomUUID();
+    await db.insert(activityLog).values({
+      companyId,
+      actorType: "system",
+      actorId: "recovery",
+      action: "issue.successful_run_handoff_escalated",
+      entityType: "issue",
+      entityId: sourceIssueId,
+      agentId: coderId,
+      details: { sourceRunId, correctiveRunId },
+    });
+
+    const recoveryActionSvc = issueRecoveryActionService(db);
+    const action = await recoveryActionSvc.upsertSourceScoped({
+      companyId,
+      sourceIssueId,
+      kind: "missing_disposition",
+      ownerType: "agent",
+      ownerAgentId: managerId,
+      cause: "successful_run_missing_issue_disposition",
+      fingerprint: "missing-disposition:escalated",
+      evidence: { sourceRunId, correctiveRunId },
+      nextAction: "Choose a valid issue disposition.",
+      wakePolicy: { type: "manual" },
+    });
+
+    await request(createApp())
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({
+        actionId: action.id,
+        outcome: "restored",
+        sourceIssueStatus: "done",
+        resolutionNote: "Operator confirmed the deliverable is complete.",
+      })
+      .expect(200);
+
+    const handoffRows = await db
+      .select()
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.entityId, sourceIssueId),
+        eq(activityLog.action, "issue.successful_run_handoff_resolved"),
+      ));
+    expect(handoffRows).toHaveLength(1);
+    expect(handoffRows[0]?.details).toMatchObject({
+      sourceRunId,
+      correctiveRunId,
+      previousHandoffState: "escalated",
+      resolvedByStatus: "done",
+      resolutionSource: "recovery_action_resolution",
+      recoveryActionId: action.id,
+      recoveryOutcome: "owner_completed",
+    });
+  });
+
   it("hands restored work back to the recorded return owner and records the outcome", async () => {
     const { companyId, managerId, coderId, sourceIssueId } = await seedCompany();
     await db
