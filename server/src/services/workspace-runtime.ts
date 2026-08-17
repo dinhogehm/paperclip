@@ -578,12 +578,24 @@ async function executeProcess(input: {
   };
 }
 
+/**
+ * Env for every git spawn in this module. `GIT_TERMINAL_PROMPT=0` is unconditional and
+ * fail-closed, independent of whether a credential was resolved: `executeProcess` gives git no
+ * stdin, so an operation needing a credential it does not have reaches for `/dev/tty` and dies
+ * with the opaque `could not read Username for 'https://github.com': No such device or address`
+ * (and blocks until a timeout wherever a tty does exist). With prompts disabled git fails
+ * immediately and names the cause, which `describeGitAuthFailure` turns into an operator note.
+ */
+function buildGitSpawnEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return { ...(env ?? process.env), GIT_TERMINAL_PROMPT: "0" };
+}
+
 async function runGit(args: string[], cwd: string, opts?: { env?: NodeJS.ProcessEnv }): Promise<string> {
   const proc = await executeProcess({
     command: "git",
     args,
     cwd,
-    env: opts?.env,
+    env: buildGitSpawnEnv(opts?.env),
   });
   if (proc.code !== 0) {
     throw new Error(proc.stderr.trim() || proc.stdout.trim() || `git ${args.join(" ")} failed`);
@@ -1404,6 +1416,7 @@ async function quarantineDirtyWorktreeBranchIncoherence(input: {
   evidence: GitWorktreeBranchIncoherenceEvidence;
   phase?: "worktree_prepare" | "workspace_finalize";
   recorder?: WorkspaceOperationRecorder | null;
+  auth?: GitRemoteAuthInvocation | null;
 }): Promise<DirtyQuarantineRepairResult> {
   const companyId = await readIssueCompanyId(input.db, input.evidence.sourceIssueId);
   if (!companyId) {
@@ -1451,6 +1464,7 @@ async function quarantineDirtyWorktreeBranchIncoherence(input: {
       phase: input.phase ?? "worktree_prepare",
       args: ["checkout", "-b", rescueBranch],
       cwd: input.worktreePath,
+      auth: input.auth ?? null,
       metadata: baseMetadata,
       successMessage: `Created rescue branch ${rescueBranch} for dirty git worktree state at ${input.worktreePath}\n`,
       failureLabel: `git checkout -b ${rescueBranch}`,
@@ -1489,6 +1503,7 @@ async function quarantineDirtyWorktreeBranchIncoherence(input: {
       phase: input.phase ?? "worktree_prepare",
       args: ["checkout", input.expectedBranchName],
       cwd: input.worktreePath,
+      auth: input.auth ?? null,
       metadata: {
         ...baseMetadata,
         rescueCommitSha,
@@ -1585,7 +1600,11 @@ async function quarantineDirtyWorktreeBranchIncoherence(input: {
     };
   } catch (error) {
     if (rescueBranchCreated && !expectedBranchRestored) {
-      await runGit(["checkout", input.expectedBranchName], input.worktreePath).catch(() => null);
+      await runGit(
+        ["checkout", input.expectedBranchName],
+        input.worktreePath,
+        input.auth ? { env: { ...process.env, ...input.auth.env } } : undefined,
+      ).catch(() => null);
     }
     if (error instanceof WorkspaceRuntimeValidationFailure) throw error;
     input.evidence.safeRepair.succeeded = false;
@@ -1763,6 +1782,11 @@ export async function ensureGitWorktreeBranchCoherent(input: {
   persistForwardReconcile?: boolean;
   reconcileOperationPhase?: "worktree_prepare" | "workspace_finalize";
   recorder?: WorkspaceOperationRecorder | null;
+  /**
+   * Credential for the repository's promisor remote. Absent, the repair `checkout`s keep
+   * ambient git behavior — correct for a full clone, and still fail fast in a partial one.
+   */
+  auth?: GitRemoteAuthInvocation | null;
 }): Promise<GitWorktreeBranchCoherenceResult> {
   const expectedBranchName = input.expectedBranchName?.trim();
   if (!expectedBranchName) return { branchName: null, reconciledForward: false, warnings: [] };
@@ -1818,6 +1842,7 @@ export async function ensureGitWorktreeBranchCoherent(input: {
       sourceIssue: input.sourceIssue,
       executionWorkspaceId: input.executionWorkspaceId ?? null,
       heartbeatRunId: input.heartbeatRunId ?? null,
+      auth: input.auth ?? null,
       evidence,
       phase: input.reconcileOperationPhase,
       recorder: input.recorder ?? null,
@@ -1968,6 +1993,7 @@ export async function ensureGitWorktreeBranchCoherent(input: {
         phase: "worktree_prepare",
         args: ["checkout", "-B", expectedBranchName, evidence.provenance.actualHeadSha],
         cwd: input.worktreePath,
+        auth: input.auth ?? null,
         metadata: {
           repoRoot: input.repoRoot,
           worktreePath: input.worktreePath,
@@ -2012,6 +2038,7 @@ export async function ensureGitWorktreeBranchCoherent(input: {
       phase: "worktree_prepare",
       args: ["checkout", expectedBranchName],
       cwd: input.worktreePath,
+      auth: input.auth ?? null,
       metadata: {
         repoRoot: input.repoRoot,
         worktreePath: input.worktreePath,
@@ -2103,6 +2130,7 @@ async function refreshUnstartedWorktreeToBase(input: {
   baseRef: string;
   currentBaseRefSha: string;
   recorder?: WorkspaceOperationRecorder | null;
+  auth?: GitRemoteAuthInvocation | null;
 }): Promise<{ refreshed: boolean; baseRefSha: string | null }> {
   if (!parseRemoteTrackingRef(input.baseRef)) {
     return { refreshed: false, baseRefSha: null };
@@ -2140,6 +2168,9 @@ async function refreshUnstartedWorktreeToBase(input: {
     phase: "worktree_prepare",
     args: ["reset", "--hard", input.currentBaseRefSha],
     cwd: input.worktreePath,
+    // Rewrites the working tree, so in a partial clone it lazily fetches the base commit's
+    // blobs from the promisor remote and needs the same credential `worktree add` gets.
+    auth: input.auth ?? null,
     metadata: {
       repoRoot: input.repoRoot,
       worktreePath: input.worktreePath,
@@ -2542,7 +2573,8 @@ async function recordGitOperation(
   },
 ): Promise<string> {
   const args = [...(input.auth?.configArgs ?? []), ...input.args];
-  const env = input.auth ? { ...process.env, ...input.auth.env } : undefined;
+  // Prompts stay disabled even with no credential resolved — see buildGitSpawnEnv.
+  const env = buildGitSpawnEnv(input.auth ? { ...process.env, ...input.auth.env } : undefined);
   const sensitiveAuthValues = Object.entries(input.auth?.env ?? {})
     .filter(([key, value]) => /(?:token|secret|password|credential|api[_-]?key)/i.test(key) && value.length > 0)
     .map(([, value]) => value);
@@ -2552,7 +2584,7 @@ async function recordGitOperation(
   );
   if (!recorder) {
     try {
-      return await runGit(args, input.cwd, env ? { env } : undefined);
+      return await runGit(args, input.cwd, { env });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(redactAuthValues(message));
@@ -2821,6 +2853,10 @@ export async function realizeExecutionWorkspace(input: {
     ...(baseRefAlreadyRefreshed ? [] : await refreshRemoteTrackingBaseRef(repoRoot, baseRef, input.resolveGitAuth)),
   ];
   const currentBaseRefSha = await resolveBaseRefSha(repoRoot, baseRef);
+  // Resolved before the reuse paths, not just before `worktree add`: refreshing a reused
+  // worktree (`reset --hard`) and repairing an incoherent branch (`checkout`) materialize a
+  // working tree too, so they lazily fetch in a partial clone exactly as creation does.
+  const worktreeGitAuth = await resolveGitWorktreeAuth(repoRoot, baseRef, input.resolveGitAuth);
 
   await fs.mkdir(worktreeParentDir, { recursive: true });
 
@@ -2833,6 +2869,7 @@ export async function realizeExecutionWorkspace(input: {
           baseRef,
           currentBaseRefSha,
           recorder: input.recorder ?? null,
+          auth: worktreeGitAuth,
         })
       : { refreshed: false, baseRefSha: null };
     const baseDrift = await inspectExecutionWorkspaceBaseDrift({
@@ -2909,6 +2946,7 @@ export async function realizeExecutionWorkspace(input: {
         enableWorkspaceDirtyQuarantineRepair: input.enableWorkspaceDirtyQuarantineRepair === true,
         reconcileOperationPhase: "worktree_prepare",
         recorder: input.recorder ?? null,
+        auth: worktreeGitAuth,
       });
       const effectiveBranchName = coherence.branchName ?? branchName;
       if (coherence.reconciledForward) {
@@ -2952,9 +2990,8 @@ export async function realizeExecutionWorkspace(input: {
   }
 
   // `git worktree add` can perform an implicit lazy fetch when the base checkout is a
-  // partial/promisor clone. Reuse the same credential provider as the explicit base-ref
-  // refresh so that private GitHub repositories do not lose authentication at this boundary.
-  const worktreeGitAuth = await resolveGitWorktreeAuth(repoRoot, baseRef, input.resolveGitAuth);
+  // partial/promisor clone. It uses the credential resolved above, shared with every other
+  // checkout-shaped operation in this function.
   try {
     await recordGitOperation(input.recorder, {
       phase: "worktree_prepare",
@@ -3087,6 +3124,14 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
     return realized;
   }
   const repoRoot = await runGit(["rev-parse", "--show-toplevel"], input.base.baseCwd);
+  // Reattaching, recreating, refreshing, or repairing a worktree can all hydrate omitted
+  // promisor objects. Resolve the credential once, before the reuse branch below returns, and
+  // keep it in the child environment and out of argv/recorded command text.
+  const worktreeGitAuth = await resolveGitWorktreeAuth(
+    repoRoot,
+    input.workspace.baseRef ?? input.base.repoRef ?? null,
+    input.resolveGitAuth,
+  );
   const recordedBaseRefSha = readRecordedBaseRefSha(input.workspace.metadata);
   if (await directoryExists(cwd)) {
     const reuseBaseRef = input.workspace.baseRef ?? input.base.repoRef ?? null;
@@ -3106,6 +3151,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
         persistForwardReconcile: false,
         reconcileOperationPhase: "worktree_prepare",
         recorder: input.recorder ?? null,
+        auth: worktreeGitAuth,
       });
       if (coherence.branchName) {
         realized.branchName = coherence.branchName;
@@ -3145,6 +3191,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
           baseRef: reuseBaseRef,
           currentBaseRefSha,
           recorder: input.recorder ?? null,
+          auth: worktreeGitAuth,
         })
       : { refreshed: false, baseRefSha: null };
     const baseDrift = await inspectExecutionWorkspaceBaseDrift({
@@ -3190,9 +3237,6 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
     : [];
   const restoreCurrentBaseRefSha = restoreBaseRef ? await resolveBaseRefSha(repoRoot, restoreBaseRef) : null;
 
-  // Reattaching or recreating a missing worktree can also hydrate omitted promisor objects.
-  // Keep the credential in the child environment and out of argv/recorded command text.
-  const worktreeGitAuth = await resolveGitWorktreeAuth(repoRoot, restoreBaseRef, input.resolveGitAuth);
   let created = false;
   try {
     await recordGitOperation(input.recorder, {
