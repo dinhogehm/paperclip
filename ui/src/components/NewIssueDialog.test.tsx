@@ -1182,17 +1182,12 @@ describe("NewIssueDialog", () => {
     act(() => root.unmount());
   });
 
-  it("hides the priority chip and mobile priority option (PAP-411)", async () => {
+  it("shows the priority chip on the new-issue dialog", async () => {
     const { root } = renderDialog(container);
     await flush();
 
-    // PAP-411: priority UI is hidden behind SHOW_TASK_PRIORITY_UI (off). Neither the
-    // desktop priority chip nor the mobile overflow priority option should render.
     const priorityChip = container.querySelector('[data-testid="new-issue-priority-chip"]');
-    expect(priorityChip).toBeNull();
-
-    const highPriorityOption = container.querySelector('[data-testid="new-issue-more-priority-high"]');
-    expect(highPriorityOption).toBeNull();
+    expect(priorityChip).not.toBeNull();
 
     act(() => root.unmount());
   });

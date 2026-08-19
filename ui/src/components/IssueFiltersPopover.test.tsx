@@ -82,7 +82,7 @@ describe("IssueFiltersPopover", () => {
     expect(popoverContent?.textContent).toContain("Live runs only");
   });
 
-  it("hides the Priority filter section while priority UI is off (PAP-411)", () => {
+  it("shows the Priority filter section", () => {
     const root = createRoot(container);
 
     act(() => {
@@ -104,6 +104,6 @@ describe("IssueFiltersPopover", () => {
     expect(popoverContent).not.toBeNull();
     // Status section still renders, Priority section is gated off (PAP-411).
     expect(popoverContent?.textContent).toContain("Status");
-    expect(popoverContent?.textContent).not.toContain("Priority");
+    expect(popoverContent?.textContent).toContain("Priority");
   });
 });

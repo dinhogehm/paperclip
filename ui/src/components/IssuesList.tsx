@@ -56,6 +56,7 @@ import {
   issueTrailingColumns,
 } from "./IssueColumns";
 import { StatusIcon } from "./StatusIcon";
+import { PriorityIcon } from "./PriorityIcon";
 import { EmptyState } from "./EmptyState";
 import { Identity } from "./Identity";
 import { IssueGroupHeader } from "./IssueGroupHeader";
@@ -2152,8 +2153,14 @@ export function IssuesList({
                               <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isExpanded && "rotate-90")} />
                             </button>
                           ) : (
-                            <span className="inline-flex items-center" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
+                            <span className="inline-flex items-center gap-1" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
                               <StatusIcon status={issue.status} size="md" blockerAttention={issue.blockerAttention} onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
+                              {SHOW_TASK_PRIORITY_UI ? (
+                                <PriorityIcon
+                                  priority={issue.priority}
+                                  onChange={(priority) => onUpdateIssue(issue.id, { priority })}
+                                />
+                              ) : null}
                             </span>
                           )
                         }
@@ -2183,6 +2190,14 @@ export function IssuesList({
                                   <StatusIcon status={issue.status} size="md" blockerAttention={issue.blockerAttention} onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
                                 </span>
                               )}
+                              prioritySlot={SHOW_TASK_PRIORITY_UI ? (
+                                <span className="inline-flex items-center" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
+                                  <PriorityIcon
+                                    priority={issue.priority}
+                                    onChange={(priority) => onUpdateIssue(issue.id, { priority })}
+                                  />
+                                </span>
+                              ) : null}
                             />
                           </>
                         )}

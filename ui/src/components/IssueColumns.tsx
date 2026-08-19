@@ -146,6 +146,7 @@ export function InboxIssueMetaLeading({
   showStatus = true,
   showIdentifier = true,
   statusSlot,
+  prioritySlot,
   checklistStepNumber = null,
 }: {
   issue: Issue;
@@ -156,6 +157,7 @@ export function InboxIssueMetaLeading({
   showStatus?: boolean;
   showIdentifier?: boolean;
   statusSlot?: ReactNode;
+  prioritySlot?: ReactNode;
   checklistStepNumber?: number | string | null;
 }) {
   const activeAgentLabel = activeAgentNames.length > 1
@@ -170,6 +172,11 @@ export function InboxIssueMetaLeading({
       {showStatus ? (
         <span className="hidden shrink-0 items-center sm:inline-flex">
           {statusSlot ?? <StatusIcon status={issue.status} blockerAttention={issue.blockerAttention} />}
+        </span>
+      ) : null}
+      {prioritySlot ? (
+        <span className="hidden shrink-0 items-center sm:inline-flex">
+          {prioritySlot}
         </span>
       ) : null}
       {checklistStepNumber !== null ? (

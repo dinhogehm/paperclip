@@ -9,6 +9,6 @@ describe("PriorityIcon", () => {
     const html = renderToStaticMarkup(<PriorityIcon priority="medium" onChange={() => {}} />);
 
     expect(html).toContain('<button type="button"');
-    expect(html).toContain('aria-label="Change priority (current: Medium)"');
+    expect(html).toContain('aria-label="Change priority (current: P2)"');
   });
 });

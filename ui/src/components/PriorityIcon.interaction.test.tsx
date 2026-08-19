@@ -37,7 +37,7 @@ describe("PriorityIcon picker", () => {
     await act(async () => root?.render(<PriorityIcon priority="medium" onChange={onChange} />));
 
     const trigger = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Change priority (current: Medium)"]',
+      'button[aria-label="Change priority (current: P2)"]',
     );
     expect(trigger).not.toBeNull();
 
@@ -46,7 +46,7 @@ describe("PriorityIcon picker", () => {
     });
 
     const highOption = [...document.body.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "High");
+      .find((button) => button.textContent?.includes("P1"));
     expect(highOption).not.toBeUndefined();
 
     await act(async () => {
