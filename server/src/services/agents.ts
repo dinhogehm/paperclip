@@ -35,6 +35,7 @@ import {
   readBuiltInAgentMarker,
 } from "./built-in-agent-metadata.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
+import { mergeRuntimeConfigPreservingHeartbeat } from "../lib/runtime-config-heartbeat.ts";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -77,6 +78,7 @@ interface UpdateAgentOptions {
   recordRevision?: RevisionMetadata;
   allowBuiltInAgentMetadata?: boolean;
   allowPendingApprovalConfigUpdate?: boolean;
+  actorType?: "user" | "agent";
 }
 
 interface CreateAgentOptions {
@@ -550,6 +552,13 @@ export function agentService(db: Db) {
         { adapterType: (normalizedPatch.adapterType ?? existing.adapterType) as string },
       );
     }
+    if (Object.prototype.hasOwnProperty.call(normalizedPatch, "runtimeConfig")) {
+      normalizedPatch.runtimeConfig = mergeRuntimeConfigPreservingHeartbeat(
+        existing.runtimeConfig,
+        normalizedPatch.runtimeConfig,
+        options?.actorType === "user" ? "user" : "agent",
+      );
+    }
 
     const shouldRecordRevision = Boolean(options?.recordRevision) && hasConfigPatchFields(normalizedPatch);
     const beforeConfig = shouldRecordRevision ? buildConfigSnapshot(existing) : null;
@@ -908,6 +917,7 @@ export function agentService(db: Db) {
 
       const patch = configPatchFromSnapshot(revision.afterConfig);
       return updateAgent(id, patch, {
+        actorType: "user",
         recordRevision: {
           createdByAgentId: actor.agentId ?? null,
           createdByUserId: actor.userId ?? null,

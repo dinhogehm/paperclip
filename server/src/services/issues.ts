@@ -1,6 +1,10 @@
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, gte, inArray, isNull, like, lt, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
+import {
+  resolveBoardIssuePriority,
+  shouldEnforceBoardPriorityPolicy,
+} from "../lib/issue-priority-policy.ts";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -1808,6 +1812,19 @@ function issueListOrderBy(
     desc(issues.updatedAt),
     desc(issues.id),
   ];
+}
+
+async function listLabelNamesByIds(
+  dbOrTx: any,
+  companyId: string,
+  labelIds: string[],
+): Promise<string[]> {
+  if (labelIds.length === 0) return [];
+  const rows = await dbOrTx
+    .select({ name: labels.name })
+    .from(labels)
+    .where(and(eq(labels.companyId, companyId), inArray(labels.id, labelIds)));
+  return rows.map((row: { name: string }) => row.name);
 }
 
 async function labelMapForIssues(dbOrTx: any, issueIds: string[]): Promise<Map<string, IssueLabelRow[]>> {
@@ -7164,6 +7181,16 @@ export function issueService(db: Db) {
         if (values.status === "cancelled") {
           values.cancelledAt = new Date();
         }
+        if (shouldEnforceBoardPriorityPolicy(companyId)) {
+          const labelNames = inputLabelIds?.length
+            ? await listLabelNamesByIds(tx, companyId, inputLabelIds)
+            : [];
+          values.priority = resolveBoardIssuePriority({
+            title: issueData.title,
+            labelNames,
+            requestedPriority: issueData.priority,
+          });
+        }
         Object.assign(
           values,
           buildInitialIssueMonitorFields({
@@ -7753,6 +7780,17 @@ export function issueService(db: Db) {
           projectGoalId: nextProjectGoalId,
           defaultGoalId: defaultCompanyGoal?.id ?? null,
         });
+        if (shouldEnforceBoardPriorityPolicy(existing.companyId)) {
+          const title = typeof issueData.title === "string" ? issueData.title : existing.title;
+          const labelNames = nextLabelIds !== undefined
+            ? await listLabelNamesByIds(tx, existing.companyId, nextLabelIds)
+            : ((await labelMapForIssues(tx, [id])).get(id) ?? []).map((label) => label.name);
+          patch.priority = resolveBoardIssuePriority({
+            title,
+            labelNames,
+            requestedPriority: issueData.priority,
+          });
+        }
         const updated = await tx
           .update(issues)
           .set(patch)
