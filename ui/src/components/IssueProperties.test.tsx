@@ -529,6 +529,28 @@ describe("IssueProperties", () => {
     act(() => root.unmount());
   });
 
+  it("shows Type and Hotfix controls in triage", async () => {
+    mockIssuesApi.listLabels.mockResolvedValue([
+      createLabel({ id: "label-bug", name: "bug", color: "#c2410c" }),
+      createLabel({ id: "label-hotfix", name: "hotfix", color: "#b91c1c" }),
+    ]);
+    const root = renderProperties(container, {
+      issue: createIssue({ labelIds: [], labels: [] }),
+      childIssues: [],
+      onUpdate: vi.fn(),
+      inline: true,
+    });
+    await flush();
+
+    await waitForAssertion(() => {
+      expect(container.querySelector('[data-property-label="Type"]')).not.toBeNull();
+      expect(container.querySelector('[data-property-label="Hotfix"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="issue-kind-bug"]')).not.toBeNull();
+    });
+
+    act(() => root.unmount());
+  });
+
   it("shows the Priority property row with a P0–P3 selector", async () => {
     const root = renderProperties(container, {
       issue: createIssue({ priority: "high" }),

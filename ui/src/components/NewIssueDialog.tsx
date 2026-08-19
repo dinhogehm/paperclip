@@ -74,7 +74,14 @@ import { cn } from "../lib/utils";
 import { extractProviderIdWithFallback } from "../lib/model-utils";
 import { issueStatusText, issueStatusTextDefault, priorityColor, priorityColorDefault } from "../lib/status-colors";
 import { issuePriorityLabel } from "../lib/issue-priority-ui";
+import {
+  ISSUE_KIND_LABELS,
+  findKindLabel,
+  nextLabelIdsForKinds,
+  type IssueKindKey,
+} from "../lib/issue-kind-labels";
 import { SHOW_TASK_PRIORITY_UI } from "../lib/ui-flags";
+import { IssueKindHotfixToggle, IssueKindTypeButtons } from "./IssueKindControls";
 import { MarkdownEditor, type MarkdownEditorRef, type MentionOption } from "./MarkdownEditor";
 import { AgentIcon } from "./AgentIconPicker";
 import { InlineEntitySelector, type InlineEntityOption } from "./InlineEntitySelector";
@@ -481,6 +488,8 @@ export function NewIssueDialog() {
   const [draftHasText, setDraftHasText] = useState(false);
   const [status, setStatus] = useState("todo");
   const [priority, setPriority] = useState("");
+  const [isBug, setIsBug] = useState(false);
+  const [isHotfix, setIsHotfix] = useState(false);
   const [assigneeValue, setAssigneeValue] = useState("");
   const [reviewerValue, setReviewerValue] = useState("");
   const [approverValue, setApproverValue] = useState("");
@@ -571,6 +580,11 @@ export function NewIssueDialog() {
     queryFn: () => instanceSettingsApi.getExperimental(),
     enabled: newIssueOpen,
     retry: false,
+  });
+  const { data: kindLabels } = useQuery({
+    queryKey: queryKeys.issues.labels(effectiveCompanyId!),
+    queryFn: () => issuesApi.listLabels(effectiveCompanyId!),
+    enabled: Boolean(effectiveCompanyId) && newIssueOpen,
   });
   const currentUserId = session?.user?.id ?? session?.session?.userId ?? null;
   const activeProjects = useMemo(
@@ -980,6 +994,8 @@ export function NewIssueDialog() {
     setIssueText("", "");
     setStatus("todo");
     setPriority("");
+    setIsBug(false);
+    setIsHotfix(false);
     setAssigneeValue("");
     setReviewerValue("");
     setApproverValue("");
@@ -1036,7 +1052,7 @@ export function NewIssueDialog() {
     closeNewIssue();
   }
 
-  function handleSubmit() {
+  async function handleSubmit() {
     const currentTitle = titleRef.current.trim();
     const currentDescription = descriptionRef.current.trim();
     if (!effectiveCompanyId || !currentTitle || createIssue.isPending) return;
@@ -1071,13 +1087,34 @@ export function NewIssueDialog() {
       reviewerValues: reviewerValue ? [reviewerValue] : [],
       approverValues: approverValue ? [approverValue] : [],
     });
+    let catalog = [...(kindLabels ?? [])];
+    const needed: IssueKindKey[] = [];
+    if (isBug || isHotfix) needed.push("bug");
+    if (isHotfix) needed.push("hotfix");
+    for (const kind of needed) {
+      if (findKindLabel(catalog, kind)) continue;
+      const spec = ISSUE_KIND_LABELS[kind];
+      const created = await issuesApi.createLabel(effectiveCompanyId, {
+        name: spec.name,
+        color: spec.color,
+      });
+      catalog = [...catalog, created];
+    }
+    const kindLabelIds = nextLabelIdsForKinds({
+      labelIds: [],
+      catalog,
+      bug: isBug || isHotfix,
+      hotfix: isHotfix,
+    });
+
     createIssue.mutate({
       companyId: effectiveCompanyId,
       stagedFiles,
       title: currentTitle,
       description: currentDescription || undefined,
       status,
-      priority: priority || "medium",
+      priority: isHotfix ? "critical" : (priority || "medium"),
+      ...(kindLabelIds.length > 0 ? { labelIds: kindLabelIds } : {}),
       workMode,
       ...(selectedAssigneeAgentId ? { assigneeAgentId: selectedAssigneeAgentId } : {}),
       ...(selectedAssigneeUserId ? { assigneeUserId: selectedAssigneeUserId } : {}),
@@ -2203,6 +2240,25 @@ export function NewIssueDialog() {
             </PopoverContent>
           </Popover>
           )}
+
+          <IssueKindTypeButtons
+            isBug={isBug}
+            isHotfix={isHotfix}
+            onApply={(next) => {
+              setIsBug(next.bug || next.hotfix);
+              setIsHotfix(next.hotfix);
+              if (next.hotfix) setPriority("critical");
+            }}
+          />
+          <IssueKindHotfixToggle
+            isBug={isBug}
+            isHotfix={isHotfix}
+            onApply={(next) => {
+              setIsBug(next.bug || next.hotfix);
+              setIsHotfix(next.hotfix);
+              if (next.hotfix) setPriority("critical");
+            }}
+          />
 
           {/* Labels chip — disabled, not wired up yet */}
           {/* <button className="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 transition-colors text-muted-foreground">
