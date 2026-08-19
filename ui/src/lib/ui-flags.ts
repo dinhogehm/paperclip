@@ -11,12 +11,10 @@
  * Controls whether task/issue **priority** indicators and controls are shown in
  * the product UI.
  *
- * Set to `false` for PAP-411 ("remove task priority level from the UI"). The
- * priority data model, API params, Zod validation (including the `"medium"`
- * default), and filter DSL are intentionally left intact so priority can be
- * revived by flipping this single boolean back to `true`.
+ * Revived for the P0–P3 hotfix lane. API values stay critical/high/medium/low;
+ * the UI labels them P0–P3. Flip back to `false` only if the board wants the
+ * PAP-411 hide again.
  *
- * Typed as `boolean` (not the literal `false`) on purpose: this keeps
- * TypeScript and lint from flagging the gated branches as unreachable/dead code.
+ * Typed as `boolean` (not a literal) so gated branches stay type-checkable.
  */
-export const SHOW_TASK_PRIORITY_UI: boolean = false;
+export const SHOW_TASK_PRIORITY_UI: boolean = true;

@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Bot, Filter, HardDrive, Search, User, X } from "lucide-react";
 import { PriorityIcon } from "./PriorityIcon";
+import { issuePriorityLabel } from "../lib/issue-priority-ui";
 import { SHOW_TASK_PRIORITY_UI } from "../lib/ui-flags";
 import { StatusIcon } from "./StatusIcon";
 import {
@@ -204,7 +205,7 @@ export function IssueFiltersPopover({
                         onCheckedChange={() => onChange({ priorities: toggleIssueFilterValue(state.priorities, priority) })}
                       />
                       <PriorityIcon priority={priority} />
-                      <span className="text-sm">{issueFilterLabel(priority)}</span>
+                      <span className="text-sm">{issuePriorityLabel(priority)}</span>
                     </label>
                   ))}
                 </div>

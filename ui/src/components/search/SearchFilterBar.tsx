@@ -10,6 +10,7 @@ import {
 } from "@paperclipai/shared";
 import { StatusIcon } from "@/components/StatusIcon";
 import { PriorityIcon } from "@/components/PriorityIcon";
+import { issuePriorityLabel } from "@/lib/issue-priority-ui";
 import { SHOW_TASK_PRIORITY_UI } from "@/lib/ui-flags";
 import { SearchFilterMenu, type FilterMenuOption } from "./SearchFilterMenu";
 import { SearchSortMenu } from "./SearchSortMenu";
@@ -81,7 +82,7 @@ export function buildSearchFilterOptions({
 
   const priority: FilterMenuOption[] = ISSUE_PRIORITIES.map((value) => ({
     value,
-    label: humanize(value),
+    label: issuePriorityLabel(value),
     icon: <PriorityIcon priority={value} />,
     count: count(counts?.priority as Record<string, number> | undefined, value),
   }));

@@ -2,6 +2,7 @@ import {
   COMPANY_SEARCH_SORTS,
   type CompanySearchSort,
 } from "@paperclipai/shared";
+import { issuePriorityLabel } from "./issue-priority-ui";
 import type { ParsedSearchQuery } from "./search-query-parser";
 
 /**
@@ -144,7 +145,7 @@ export function buildFilterChips(filters: SearchFilters, lookups: FilterChipLook
   for (const priority of filters.priority ?? []) {
     chips.push({
       id: `priority:${priority}`,
-      label: `Priority: ${humanize(priority)}`,
+      label: `Priority: ${issuePriorityLabel(priority)}`,
       remove: (current) => {
         const next = { ...current };
         const remaining = (current.priority ?? []).filter((value) => value !== priority);
