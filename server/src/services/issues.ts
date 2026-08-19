@@ -4,7 +4,7 @@ import { and, asc, desc, eq, gt, gte, inArray, isNull, like, lt, ne, notInArray,
 import {
   resolveBoardIssuePriority,
   shouldEnforceBoardPriorityPolicy,
-} from "../lib/issue-priority-policy.ts";
+} from "../lib/issue-priority-policy.js";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,

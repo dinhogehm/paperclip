@@ -3,7 +3,7 @@ import {
   NURIA_OPS_COMPANY_ID,
   resolveBoardIssuePriority,
   shouldEnforceBoardPriorityPolicy,
-} from "./issue-priority-policy.ts";
+} from "./issue-priority-policy.js";
 
 describe("shouldEnforceBoardPriorityPolicy", () => {
   it("applies only to the nuria-ops company", () => {
