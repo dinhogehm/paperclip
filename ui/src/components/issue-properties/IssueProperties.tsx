@@ -48,6 +48,11 @@ import { RetryErrorBand } from "../IssueScheduledRetryCard";
 import { StatusIcon } from "../StatusIcon";
 import { PriorityIcon } from "../PriorityIcon";
 import { SHOW_TASK_PRIORITY_UI } from "../../lib/ui-flags";
+import {
+  IssueKindHotfixToggle,
+  IssueKindTypeButtons,
+  useIssueKindActions,
+} from "../IssueKindControls";
 import { Identity } from "../Identity";
 import { IssueReferencePill } from "../IssueReferencePill";
 import { formatDate, formatDateTime, cn, projectUrl } from "../../lib/utils";
@@ -331,6 +336,13 @@ export function IssueProperties({
     queryKey: queryKeys.issues.labels(companyId!),
     queryFn: () => issuesApi.listLabels(companyId!),
     enabled: !!companyId,
+  });
+  const issueKind = useIssueKindActions({
+    companyId,
+    labelIds: issue.labelIds ?? [],
+    labels,
+    issueLabels: issue.labels,
+    onChange: onUpdate,
   });
 
   const { data: allIssues, isFetching: isFetchingIssuePickerIssues } = useQuery({
@@ -1405,7 +1417,11 @@ export function IssueProperties({
 
     return selectedIds
       .map((id) => labelById.get(id))
-      .filter((label): label is IssueLabel => Boolean(label));
+      .filter((label): label is IssueLabel => Boolean(label))
+      .filter((label) => {
+        const name = label.name.toLowerCase();
+        return name !== "bug" && name !== "hotfix";
+      });
   }, [issue.labelIds, issue.labels, labels]);
 
   const labelsTrigger = selectedIssueLabels.length > 0 ? (
@@ -1456,8 +1472,10 @@ export function IssueProperties({
       <div className="max-h-44 overflow-y-auto overscroll-contain space-y-0.5">
         {(labels ?? [])
           .filter((label) => {
+            const name = label.name.toLowerCase();
+            if (name === "bug" || name === "hotfix") return false;
             if (!labelSearch.trim()) return true;
-            return label.name.toLowerCase().includes(labelSearch.toLowerCase());
+            return name.includes(labelSearch.toLowerCase());
           })
           .map((label) => {
             const selected = (issue.labelIds ?? []).includes(label.id);
@@ -2088,6 +2106,23 @@ export function IssueProperties({
             />
           </PropertyRow>
         )}
+
+        <PropertyRow label="Type">
+          <IssueKindTypeButtons
+            isBug={issueKind.isBug}
+            isHotfix={issueKind.isHotfix}
+            onApply={(next) => void issueKind.apply(next)}
+          />
+        </PropertyRow>
+
+        <PropertyRow label="Hotfix">
+          <IssueKindHotfixToggle
+            isBug={issueKind.isBug}
+            isHotfix={issueKind.isHotfix}
+            disabled={!companyId || issueKind.pending}
+            onApply={(next) => void issueKind.apply(next)}
+          />
+        </PropertyRow>
 
         <PropertyPicker
           inline={inline}

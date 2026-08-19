@@ -19,6 +19,7 @@ import { cn } from "../lib/utils";
 import { timeAgo } from "../lib/timeAgo";
 import { Identity } from "./Identity";
 import { StatusIcon } from "./StatusIcon";
+import { IssueKindBadges } from "./IssueKindBadges";
 import { Badge } from "@/components/ui/badge";
 
 export const issueTrailingColumns: InboxIssueColumn[] = ["assignee", "kickedOffBy", "project", "workspace", "parent", "labels", "updated"];
@@ -189,6 +190,7 @@ export function InboxIssueMetaLeading({
           {issue.identifier ?? issue.id.slice(0, 8)}
         </span>
       ) : null}
+      <IssueKindBadges issue={issue} />
       {isLive && (
         <Badge
           variant="ghost"
@@ -417,10 +419,14 @@ export function InboxIssueTrailingColumns({
         }
 
         if (column === "labels") {
-          if ((issue.labels ?? []).length > 0) {
+          const extraLabels = (issue.labels ?? []).filter((label) => {
+            const name = label.name.toLowerCase();
+            return name !== "bug" && name !== "hotfix";
+          });
+          if (extraLabels.length > 0) {
             return (
               <span key={column} className="flex min-w-0 items-center gap-1 overflow-hidden">
-                {(issue.labels ?? []).slice(0, 2).map((label) => (
+                {extraLabels.slice(0, 2).map((label) => (
                   <Badge variant="outline"
                     key={label.id}
                     className="min-w-0 max-w-full px-1.5 py-0 text-(length:--text-nano)"
@@ -433,9 +439,9 @@ export function InboxIssueTrailingColumns({
                     <span className="truncate">{label.name}</span>
                   </Badge>
                 ))}
-                {(issue.labels ?? []).length > 2 ? (
+                {extraLabels.length > 2 ? (
                   <span className="shrink-0 text-(length:--text-nano) font-medium text-muted-foreground">
-                    +{(issue.labels ?? []).length - 2}
+                    +{extraLabels.length - 2}
                   </span>
                 ) : null}
               </span>
