@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeRuntimeConfigPreservingHeartbeat } from "./runtime-config-heartbeat.ts";
+import { mergeRuntimeConfigPreservingHeartbeat } from "./runtime-config-heartbeat.js";
 
 const liveHeartbeat = {
   enabled: true,

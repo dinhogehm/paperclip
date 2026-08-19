@@ -1,4 +1,4 @@
-import { readObject } from "./objects.ts";
+import { readObject } from "./objects.js";
 
 export type HeartbeatPreserveActor = "user" | "agent";
 
@@ -34,15 +34,15 @@ export function mergeRuntimeConfigPreservingHeartbeat(
   }
 
   const existingHb = readObject(existingRc.heartbeat);
-  if (actorType !== "agent" || !isLiveHeartbeat(existingHb)) {
+  if (actorType !== "agent" || !isLiveHeartbeat(existingHb) || !existingHb) {
     return next;
   }
 
   const incomingHb = readObject(incomingRc.heartbeat) ?? {};
-  const merged = { ...existingHb, ...incomingHb, enabled: true };
+  const merged: Record<string, unknown> = { ...existingHb, ...incomingHb, enabled: true };
   const intervalSec = parseFiniteNumber(merged.intervalSec);
   if (intervalSec === null || intervalSec <= 0) {
-    merged.intervalSec = existingHb?.intervalSec;
+    merged.intervalSec = existingHb.intervalSec;
   }
   next.heartbeat = merged;
   return next;

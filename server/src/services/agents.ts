@@ -35,7 +35,7 @@ import {
   readBuiltInAgentMarker,
 } from "./built-in-agent-metadata.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
-import { mergeRuntimeConfigPreservingHeartbeat } from "../lib/runtime-config-heartbeat.ts";
+import { mergeRuntimeConfigPreservingHeartbeat } from "../lib/runtime-config-heartbeat.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
