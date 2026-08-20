@@ -160,6 +160,9 @@
   --status-task-todo: #f59e0b;
   --status-task-in_progress: #2563eb;
   --status-task-in_review: #7c3aed;
+  --status-task-pr_open: #0891b2;
+  --status-task-merged: #0d9488;
+  --status-task-in_production: #059669;
   --status-task-done: #22c55e;
   --status-task-blocked: #dc2626;
   --status-task-cancelled: #a8aeb2;
@@ -178,6 +181,9 @@
   --status-task-icon-todo: #cc7a00;       /* amber darkened — clears 3:1 */
   --status-task-icon-in_progress: var(--status-task-in_progress); /* #2563eb both modes */
   --status-task-icon-in_review: var(--status-task-in_review);     /* #7c3aed (light) */
+  --status-task-icon-pr_open: var(--status-task-pr_open);
+  --status-task-icon-merged: var(--status-task-merged);
+  --status-task-icon-in_production: var(--status-task-in_production);
   --status-task-icon-done: #16a34a;       /* green darkened — clears 3:1 */
   --status-task-icon-blocked: var(--status-task-blocked);         /* #dc2626 both modes */
   --status-task-icon-cancelled: #52585d;
@@ -342,6 +348,9 @@
   --status-task-icon-backlog: #9a958a;
   --status-task-icon-todo: #fbbf24;
   --status-task-icon-in_review: #9474f0;  /* deeper than violet-400, reads purple */
+  --status-task-icon-pr_open: #22d3ee;
+  --status-task-icon-merged: #2dd4bf;
+  --status-task-icon-in_production: #34d399;
   --status-task-icon-done: #34d06f;
   --status-task-icon-cancelled: #9a958a;
 }

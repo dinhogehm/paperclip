@@ -2757,7 +2757,7 @@ export function agentRoutes(
     const recoveryActionsSvc = issueRecoveryActionService(db);
     const rows = await issuesSvc.list(req.actor.companyId, {
       assigneeAgentId: req.actor.agentId,
-      status: "todo,in_progress,blocked",
+      status: "todo,in_progress,pr_open,blocked",
       includeRoutineExecutions: true,
       limit: ISSUE_LIST_DEFAULT_LIMIT,
     });

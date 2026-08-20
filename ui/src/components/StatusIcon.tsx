@@ -4,12 +4,9 @@ import { cn } from "../lib/utils";
 import { StatusGlyph, type StatusGlyphSize } from "./StatusGlyph";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
+import { ISSUE_STATUS_PICKER_ORDER, issueStatusLabel } from "../lib/issue-status-ui";
 
-const allStatuses = ["backlog", "todo", "in_progress", "in_review", "done", "cancelled", "blocked"];
-
-function statusLabel(status: string): string {
-  return status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}
+const allStatuses = ISSUE_STATUS_PICKER_ORDER;
 
 interface StatusIconProps {
   status: string;
@@ -78,7 +75,7 @@ function blockedAttentionLabel(blockerAttention: IssueBlockerAttention | null | 
 export function StatusIcon({ status, blockerAttention, onChange, className, showLabel, size = "md" }: StatusIconProps) {
   const [open, setOpen] = useState(false);
   const isCoveredBlocked = status === "blocked" && blockerAttention?.state === "covered";
-  const ariaLabel = status === "blocked" ? blockedAttentionLabel(blockerAttention) : statusLabel(status);
+  const ariaLabel = status === "blocked" ? blockedAttentionLabel(blockerAttention) : issueStatusLabel(status);
   const glyphStatus = isCoveredBlocked ? "in_queue" : status;
 
   const glyph = (
@@ -94,7 +91,7 @@ export function StatusIcon({ status, blockerAttention, onChange, className, show
     return showLabel ? (
       <span className="inline-flex items-center gap-1.5">
         {glyph}
-        <span className="text-sm">{statusLabel(status)}</span>
+        <span className="text-sm">{issueStatusLabel(status)}</span>
       </span>
     ) : (
       glyph
@@ -108,7 +105,7 @@ export function StatusIcon({ status, blockerAttention, onChange, className, show
       className="inline-flex min-h-5 items-center gap-1.5 cursor-pointer hover:bg-accent/50 rounded px-1 -mx-1 py-0.5 transition-colors"
     >
       {glyph}
-      <span className="text-sm">{statusLabel(status)}</span>
+      <span className="text-sm">{issueStatusLabel(status)}</span>
     </button>
   ) : (
     <button
@@ -124,7 +121,7 @@ export function StatusIcon({ status, blockerAttention, onChange, className, show
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>{trigger}</PopoverTrigger>
-      <PopoverContent className="w-40 p-1" align="start">
+      <PopoverContent className="w-56 p-1" align="start">
         {allStatuses.map((s) => (
           <Button
             key={s}
@@ -137,7 +134,7 @@ export function StatusIcon({ status, blockerAttention, onChange, className, show
             }}
           >
             <StatusIcon status={s} size="lg" />
-            {statusLabel(s)}
+            {issueStatusLabel(s)}
           </Button>
         ))}
       </PopoverContent>

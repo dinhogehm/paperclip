@@ -2,6 +2,7 @@
 
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { ISSUE_STATUS_PICKER_ORDER } from "../lib/issue-status-ui";
 import { StatusIcon } from "./StatusIcon";
 
 /**
@@ -84,6 +85,27 @@ describe("StatusIcon", () => {
       />,
     );
     expect(html).toContain("Blocked · review stalled on PAP-2279");
+  });
+
+  it("labels delivery statuses in Portuguese", () => {
+    expect(renderToStaticMarkup(<StatusIcon status="pr_open" showLabel />)).toContain("PR aberta");
+    expect(renderToStaticMarkup(<StatusIcon status="merged" showLabel />)).toContain("Mesclado");
+    expect(renderToStaticMarkup(<StatusIcon status="in_production" showLabel />)).toContain("Publicado em produção");
+  });
+
+  it("offers delivery statuses in the picker order", () => {
+    expect(ISSUE_STATUS_PICKER_ORDER).toEqual([
+      "backlog",
+      "todo",
+      "in_progress",
+      "in_review",
+      "pr_open",
+      "merged",
+      "in_production",
+      "blocked",
+      "done",
+      "cancelled",
+    ]);
   });
 
   it("uses an accessible native button for the icon-only picker trigger", () => {

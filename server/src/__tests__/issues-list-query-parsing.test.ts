@@ -56,4 +56,22 @@ describeEmbeddedPostgres("issue list status query parsing", () => {
   it("returns every status when ?status is absent", async () => {
     expect(await listStatuses("")).toEqual(["done", "in_progress", "todo"]);
   });
+
+  it("accepts and returns delivery statuses on list", async () => {
+    const company = await seedCompanyWithBoardAccess(ctx.db, "Delivery statuses");
+    const companyId = company.companyId;
+    await ctx.db.insert(issues).values([
+      { id: randomUUID(), companyId, title: "PR open", status: "pr_open", priority: "medium" },
+      { id: randomUUID(), companyId, title: "Merged", status: "merged", priority: "medium" },
+      { id: randomUUID(), companyId, title: "In production", status: "in_production", priority: "medium" },
+    ]);
+    const listed = await request(routeApp(ctx.db, company.actor, issueRoutes))
+      .get(`/api/companies/${companyId}/issues?status=pr_open,merged,in_production`)
+      .expect(200);
+    expect((listed.body as { status: string }[]).map((issue) => issue.status).sort()).toEqual([
+      "in_production",
+      "merged",
+      "pr_open",
+    ]);
+  });
 });

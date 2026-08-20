@@ -19,6 +19,7 @@ import {
 } from "@dnd-kit/sortable";
 import { StatusIcon } from "./StatusIcon";
 import { PriorityIcon } from "./PriorityIcon";
+import { issueStatusLabel } from "../lib/issue-status-ui";
 import { SHOW_TASK_PRIORITY_UI } from "../lib/ui-flags";
 import { Identity } from "./Identity";
 import type { Issue, IssueStatus } from "@paperclipai/shared";
@@ -42,6 +43,9 @@ export const boardStatuses = [
   "todo",
   "in_progress",
   "in_review",
+  "pr_open",
+  "merged",
+  "in_production",
   "blocked",
   "done",
   "cancelled",
@@ -106,6 +110,33 @@ export const kanbanColumnTones: Partial<Record<IssueStatus, typeof defaultKanban
     bodyOver: "bg-violet-100/70 ring-1 ring-inset ring-violet-500/25 dark:bg-violet-950/30",
     card: "",
   },
+  pr_open: {
+    rail: "border-cyan-500/25 bg-cyan-50/60 dark:bg-cyan-950/20",
+    railOver: "bg-cyan-100/70 ring-1 ring-cyan-500/25 dark:bg-cyan-950/35",
+    header: "text-cyan-700 dark:text-cyan-300",
+    count: "text-cyan-700/65 dark:text-cyan-300/65",
+    body: "bg-cyan-50/45 ring-1 ring-inset ring-cyan-500/15 dark:bg-cyan-950/15",
+    bodyOver: "bg-cyan-100/70 ring-1 ring-inset ring-cyan-500/25 dark:bg-cyan-950/30",
+    card: "",
+  },
+  merged: {
+    rail: "border-teal-500/25 bg-teal-50/60 dark:bg-teal-950/20",
+    railOver: "bg-teal-100/70 ring-1 ring-teal-500/25 dark:bg-teal-950/35",
+    header: "text-teal-700 dark:text-teal-300",
+    count: "text-teal-700/65 dark:text-teal-300/65",
+    body: "bg-teal-50/45 ring-1 ring-inset ring-teal-500/15 dark:bg-teal-950/15",
+    bodyOver: "bg-teal-100/70 ring-1 ring-inset ring-teal-500/25 dark:bg-teal-950/30",
+    card: "",
+  },
+  in_production: {
+    rail: "border-emerald-500/25 bg-emerald-50/60 dark:bg-emerald-950/20",
+    railOver: "bg-emerald-100/70 ring-1 ring-emerald-500/25 dark:bg-emerald-950/35",
+    header: "text-emerald-700 dark:text-emerald-300",
+    count: "text-emerald-700/65 dark:text-emerald-300/65",
+    body: "bg-emerald-50/45 ring-1 ring-inset ring-emerald-500/15 dark:bg-emerald-950/15",
+    bodyOver: "bg-emerald-100/70 ring-1 ring-inset ring-emerald-500/25 dark:bg-emerald-950/30",
+    card: "",
+  },
   done: {
     rail: "border-green-500/25 bg-green-50/60 dark:bg-green-950/20",
     railOver: "bg-green-100/70 ring-1 ring-green-500/25 dark:bg-green-950/35",
@@ -131,7 +162,7 @@ export function getKanbanColumnTone(status: IssueStatus) {
 }
 
 function statusLabel(status: string): string {
-  return status.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return issueStatusLabel(status);
 }
 
 export function resolveKanbanTargetStatus(overId: string, issues: Issue[]): IssueStatus | null {

@@ -62,7 +62,7 @@ Overrides and special cases:
 ```
 POST /api/issues/{issueId}/checkout
 Headers: Authorization: Bearer $PAPERCLIP_API_KEY, X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
-{ "agentId": "{your-agent-id}", "expectedStatuses": ["todo", "backlog", "blocked", "in_review"] }
+{ "agentId": "{your-agent-id}", "expectedStatuses": ["todo", "backlog", "blocked", "in_review", "pr_open", "merged"] }
 ```
 
 If already checked out by you, returns normally. If owned by another agent: `409 Conflict` — stop, pick a different task. **Never retry a 409.**
@@ -141,7 +141,7 @@ Done
 MD
 ```
 
-Status values: `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`, `cancelled`. Priority values: `critical`, `high`, `medium`, `low`. Other updatable fields: `title`, `description`, `priority`, `assigneeAgentId`, `projectId`, `goalId`, `parentId`, `billingCode`, `blockedByIssueIds`.
+Status values: `backlog`, `todo`, `in_progress`, `in_review`, `pr_open`, `merged`, `in_production`, `done`, `blocked`, `cancelled`. Priority values: `critical`, `high`, `medium`, `low`. Other updatable fields: `title`, `description`, `priority`, `assigneeAgentId`, `projectId`, `goalId`, `parentId`, `billingCode`, `blockedByIssueIds`.
 
 ### Status Quick Guide
 
@@ -149,6 +149,9 @@ Status values: `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`,
 - `todo` — ready and actionable, but not checked out yet. Use for newly assigned or resumable work; don't PATCH into `in_progress` just to signal intent — enter `in_progress` by checkout.
 - `in_progress` — actively owned, execution-backed work.
 - `in_review` — paused pending reviewer/approver/board/user feedback. Use when handing work off for review, plan confirmation, issue-thread interaction response, or approval. This is a healthy waiting path, not a synonym for done. If a human asks to take the task back, reassign to them and set `in_review`.
+- `pr_open` — a pull request is open for this task. Use after you open the PR; do not keep the issue in `in_progress` once the remaining work is review/CI on that PR.
+- `merged` — the pull request is merged. Use after merge; remaining work is deploy/verify, not more coding on that branch.
+- `in_production` — the change is live in production. Use after deploy; close with `done` only when no follow-up remains on this issue.
 - `blocked` — cannot proceed until something specific changes. Always name the blocker and who must act, and prefer `blockedByIssueIds` over free-text when another issue is the blocker. `parentId` alone does not imply a blocker.
 - `done` — work complete, no follow-up on this issue.
 - `cancelled` — intentionally abandoned, not to be resumed.

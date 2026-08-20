@@ -6,6 +6,7 @@ import {
   applyIssueFilters,
   countActiveIssueFilters,
   defaultIssueFilterState,
+  issueQuickFilterPresets,
   resolveIssueFilterWorkspaceId,
   shouldIncludeIssueFilterWorkspaceOption,
 } from "./issue-filters";
@@ -68,6 +69,18 @@ function makeExternalObjectSummary(overrides: Partial<ExternalObjectSummary> = {
 }
 
 describe("issue filters", () => {
+  it("includes delivery statuses in the Active preset", () => {
+    expect(issueQuickFilterPresets.find((preset) => preset.label === "Active")?.statuses).toEqual([
+      "todo",
+      "in_progress",
+      "in_review",
+      "pr_open",
+      "merged",
+      "in_production",
+      "blocked",
+    ]);
+  });
+
   it("filters issues by creator across agents and users", () => {
     const issues = [
       makeIssue({ id: "agent-match", createdByAgentId: "agent-1" }),

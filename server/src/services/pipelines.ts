@@ -2487,7 +2487,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
           eq(pipelineCaseIssueLinks.companyId, input.companyId),
           inArray(pipelineCaseIssueLinks.caseId, effectCaseIds),
           eq(pipelineCaseIssueLinks.role, "work"),
-          inArray(issues.status, ["todo", "in_progress", "in_review", "blocked"]),
+          inArray(issues.status, ["todo", "in_progress", "in_review", "pr_open", "merged", "in_production", "blocked"]),
         ));
     const blockerRows = await dbOrTx
       .select({ blockedByCaseId: pipelineCaseBlockers.blockedByCaseId })

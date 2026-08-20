@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 import type { Issue, IssueStatus } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getKanbanColumnTone, KanbanBoard, resolveKanbanTargetStatus } from "./KanbanBoard";
+import { boardStatuses, getKanbanColumnTone, KanbanBoard, resolveKanbanTargetStatus } from "./KanbanBoard";
 
 vi.mock("@/lib/router", () => ({
   Link: ({
@@ -188,6 +188,21 @@ describe("KanbanBoard", () => {
     expect(container.textContent).not.toContain("Issue 1");
   });
 
+  it("places delivery columns after In Review and before Blocked", () => {
+    expect(boardStatuses).toEqual([
+      "backlog",
+      "todo",
+      "in_progress",
+      "in_review",
+      "pr_open",
+      "merged",
+      "in_production",
+      "blocked",
+      "done",
+      "cancelled",
+    ]);
+  });
+
   it("gives every column a status-hued tone", () => {
     expect(getKanbanColumnTone("backlog").body).toContain("bg-muted/30");
     expect(getKanbanColumnTone("todo").body).toContain("amber");
@@ -197,6 +212,23 @@ describe("KanbanBoard", () => {
     expect(getKanbanColumnTone("done").body).toContain("green");
     expect(getKanbanColumnTone("cancelled").body).toContain("bg-muted/25");
     expect(getKanbanColumnTone("cancelled").card).toContain("opacity-80");
+    expect(getKanbanColumnTone("pr_open").body).toContain("cyan");
+    expect(getKanbanColumnTone("merged").body).toContain("teal");
+    expect(getKanbanColumnTone("in_production").body).toContain("emerald");
+  });
+
+  it("renders delivery columns with Portuguese labels", () => {
+    const { container } = renderBoard({
+      issues: [
+        ...createIssues(1, "pr_open"),
+        ...createIssues(1, "merged"),
+        ...createIssues(1, "in_production"),
+      ],
+    });
+
+    expect(container.textContent).toContain("PR aberta");
+    expect(container.textContent).toContain("Mesclado");
+    expect(container.textContent).toContain("Publicado em produção");
   });
 
   it("ghosts cancelled lane cards", () => {
