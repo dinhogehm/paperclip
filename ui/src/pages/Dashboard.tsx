@@ -22,6 +22,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { MetricCard } from "../components/MetricCard";
 import { EmptyState } from "../components/EmptyState";
 import { StatusIcon } from "../components/StatusIcon";
+import { PriorityIcon } from "../components/PriorityIcon";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSharedPolling";
 
 import { ActivityRow } from "../components/ActivityRow";
@@ -432,8 +433,9 @@ export function Dashboard() {
                     >
                       <div className="flex items-start gap-2 sm:items-center sm:gap-3">
                         {/* Status icon - left column on mobile */}
-                        <span className="shrink-0 sm:hidden">
+                        <span className="inline-flex shrink-0 items-center gap-1 sm:hidden">
                           <StatusIcon status={issue.status} blockerAttention={issue.blockerAttention} />
+                          {SHOW_TASK_PRIORITY_UI ? <PriorityIcon priority={issue.priority} /> : null}
                         </span>
 
                         {/* Right column on mobile: title + metadata stacked */}
@@ -442,7 +444,14 @@ export function Dashboard() {
                             {issue.title}
                           </span>
                           <span className="flex items-center gap-2 sm:order-1 sm:shrink-0">
-                            <span className="hidden sm:inline-flex"><StatusIcon status={issue.status} blockerAttention={issue.blockerAttention} /></span>
+                            <span className="hidden sm:inline-flex">
+                              <StatusIcon status={issue.status} blockerAttention={issue.blockerAttention} showLabel />
+                            </span>
+                            {SHOW_TASK_PRIORITY_UI ? (
+                              <span className="hidden sm:inline-flex">
+                                <PriorityIcon priority={issue.priority} showLabel />
+                              </span>
+                            ) : null}
                             <span className="text-xs font-mono text-muted-foreground">
                               {issue.identifier ?? issue.id.slice(0, 8)}
                             </span>
