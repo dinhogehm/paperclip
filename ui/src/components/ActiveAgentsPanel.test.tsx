@@ -4,6 +4,7 @@ import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { issueStatusLabel } from "@/lib/issue-status-ui";
 import { ActiveAgentsPanel } from "./ActiveAgentsPanel";
 
 const mockHeartbeatsApi = vi.hoisted(() => ({
@@ -226,7 +227,7 @@ describe("ActiveAgentsPanel", () => {
       );
       expect(issueLink?.textContent).toBe("PAP-3562 - Phase 4B: Implement LLM Wiki distillation UI");
       expect(issueLink?.getAttribute("href")).toBe("/issues/PAP-3562");
-      expect(container.textContent).toContain("In Progress");
+      expect(container.textContent).toContain(issueStatusLabel("in_progress"));
       expect(container.textContent).toContain("P2");
     });
 
