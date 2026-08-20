@@ -17,6 +17,9 @@ import { RunChatSurface } from "./RunChatSurface";
 import { useLiveRunTranscripts } from "./transcript/useLiveRunTranscripts";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSharedPolling";
 import { Badge } from "@/components/ui/badge";
+import { StatusIcon } from "./StatusIcon";
+import { PriorityIcon } from "./PriorityIcon";
+import { SHOW_TASK_PRIORITY_UI } from "../lib/ui-flags";
 
 function RunCardRecoveryChip({ action }: { action: IssueRecoveryAction }) {
   const state = deriveActiveRecoveryDisplayState(action);
@@ -228,6 +231,14 @@ const AgentRunCard = memo(function AgentRunCard({
               {issue?.identifier ?? run.issueId.slice(0, 8)}
               {issue?.title ? ` - ${issue.title}` : ""}
             </Link>
+            {issue ? (
+              <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                <StatusIcon status={issue.status} blockerAttention={issue.blockerAttention} showLabel />
+                {SHOW_TASK_PRIORITY_UI ? (
+                  <PriorityIcon priority={issue.priority} showLabel />
+                ) : null}
+              </div>
+            ) : null}
             {issue?.activeRecoveryAction ? (
               <div className="mt-1.5">
                 <RunCardRecoveryChip action={issue.activeRecoveryAction} />
