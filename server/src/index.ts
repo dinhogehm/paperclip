@@ -539,7 +539,15 @@ export async function startServer(): Promise<StartedServer> {
   }
 
   const requestedListenPort = config.port;
-  const listenPort = await detectPort(requestedListenPort);
+  // Platforms like Railway assign PORT and health-check that exact port.
+  // detect-port must not move us off it: a new listen port looks like
+  // "service unavailable" for the entire healthcheck window.
+  const envPort = Number(process.env.PORT);
+  const pinToPlatformPort =
+    Number.isInteger(envPort) && envPort > 0 && envPort === requestedListenPort;
+  const listenPort = pinToPlatformPort
+    ? requestedListenPort
+    : await detectPort(requestedListenPort);
   if (config.authBaseUrlMode === "explicit" && config.authPublicBaseUrl) {
     config.authPublicBaseUrl = rewriteLoopbackUrlPort(config.authPublicBaseUrl, listenPort);
   }

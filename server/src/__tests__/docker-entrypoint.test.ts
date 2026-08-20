@@ -131,6 +131,12 @@ describe("docker-entrypoint.sh", () => {
     expect(calls).toContain("gosu node echo ENTRYPOINT-CMD-RAN");
   });
 
+  it("bounds recursive chown so a large volume cannot block listen", async () => {
+    const source = readFileSync(ENTRYPOINT, "utf8");
+    expect(source).toMatch(/timeout 25 chown -R node:node/);
+    expect(source).toMatch(/chown timed out; starting anyway/);
+  });
+
   it("honours PAPERCLIP_HOME for the ownership probe", async () => {
     installStubs({ uid: 0, gid: 0, homeMismatch: true });
 
