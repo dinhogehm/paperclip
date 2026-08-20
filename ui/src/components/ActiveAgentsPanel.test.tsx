@@ -226,6 +226,8 @@ describe("ActiveAgentsPanel", () => {
       );
       expect(issueLink?.textContent).toBe("PAP-3562 - Phase 4B: Implement LLM Wiki distillation UI");
       expect(issueLink?.getAttribute("href")).toBe("/issues/PAP-3562");
+      expect(container.textContent).toContain("In Progress");
+      expect(container.textContent).toContain("P2");
     });
 
     await act(async () => {
