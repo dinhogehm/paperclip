@@ -4430,7 +4430,7 @@ export function issueRoutes(
       .where(and(
         eq(issueRows.companyId, parent.companyId),
         eq(issueRows.parentId, parent.id),
-        inArray(issueRows.status, ["todo", "in_progress", "in_review", "blocked"]),
+        inArray(issueRows.status, ["todo", "in_progress", "in_review", "pr_open", "merged", "in_production", "blocked"]),
         isNull(issueRows.hiddenAt),
       ))
       .orderBy(asc(issueRows.issueNumber), asc(issueRows.createdAt), asc(issueRows.id));

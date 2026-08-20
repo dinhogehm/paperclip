@@ -60,6 +60,7 @@ import type {
   SuccessfulRunHandoffState,
 } from "@paperclipai/shared";
 import {
+  ISSUE_STATUSES,
   clampIssueRequestDepth,
   extractAgentMentionIds,
   extractProjectMentionIds,
@@ -142,7 +143,7 @@ import {
   type CodeDeliveryEvidenceRequiredDetails,
 } from "./code-delivery-disposition.js";
 
-const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
+const ALL_ISSUE_STATUSES = ISSUE_STATUSES;
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
 export const ISSUE_LIST_DEFAULT_LIMIT = 500;
 export const ISSUE_LIST_MAX_LIMIT = 1000;
@@ -193,7 +194,7 @@ function wakeDiagnosticActivityTargetsIssue(issueId: string) {
 
 function assertTransition(from: string, to: string) {
   if (from === to) return;
-  if (!ALL_ISSUE_STATUSES.includes(to)) {
+  if (!(ALL_ISSUE_STATUSES as readonly string[]).includes(to)) {
     throw conflict(`Unknown issue status: ${to}`);
   }
 }

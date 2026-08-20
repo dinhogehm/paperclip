@@ -2430,11 +2430,11 @@ async function loadBuiltFromAutomation(
 }
 
 function isLiveIssueStatus(status: string) {
-  return status === "todo" || status === "in_progress" || status === "in_review";
+  return status === "todo" || status === "in_progress" || status === "in_review" || status === "pr_open";
 }
 
 function isWaitingIssueStatus(status: string) {
-  return status === "backlog" || status === "todo" || status === "in_review";
+  return status === "backlog" || status === "todo" || status === "in_review" || status === "merged" || status === "in_production";
 }
 
 function summarizeLinkedIssue(issue: typeof issueRows.$inferSelect) {

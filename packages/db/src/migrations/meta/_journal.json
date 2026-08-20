@@ -1527,6 +1527,13 @@
       "when": 1786643974972,
       "tag": "0219_yielding_starbolt",
       "breakpoints": true
+    },
+    {
+      "idx": 220,
+      "version": "7",
+      "when": 1787231913074,
+      "tag": "0220_breezy_quasar",
+      "breakpoints": true
     }
   ]
 }

@@ -1,4 +1,5 @@
 import type { ExternalObjectSummary, Issue } from "@paperclipai/shared";
+import { issueStatusLabel } from "./issue-status-ui";
 
 export type IssueFilterWorkspaceLookup = {
   mode?: string | null;
@@ -76,18 +77,29 @@ export function externalObjectFilterLabel(value: string): string {
   return EXTERNAL_OBJECT_FILTER_LABELS[value] ?? issueFilterLabel(value);
 }
 
-export const issueStatusOrder = ["in_progress", "todo", "backlog", "in_review", "blocked", "done", "cancelled"];
+export const issueStatusOrder = [
+  "in_progress",
+  "todo",
+  "backlog",
+  "in_review",
+  "pr_open",
+  "merged",
+  "in_production",
+  "blocked",
+  "done",
+  "cancelled",
+];
 export const issuePriorityOrder = ["critical", "high", "medium", "low"];
 
 export const issueQuickFilterPresets = [
   { label: "All", statuses: [] as string[] },
-  { label: "Active", statuses: ["todo", "in_progress", "in_review", "blocked"] },
+  { label: "Active", statuses: ["todo", "in_progress", "in_review", "pr_open", "merged", "in_production", "blocked"] },
   { label: "Backlog", statuses: ["backlog"] },
   { label: "Done", statuses: ["done", "cancelled"] },
 ];
 
 export function issueFilterLabel(value: string): string {
-  return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+  return issueStatusLabel(value);
 }
 
 export function issueFilterArraysEqual(a: string[], b: string[]): boolean {

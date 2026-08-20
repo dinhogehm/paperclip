@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_ISSUE_REQUEST_DEPTH } from "../index.js";
+import { ISSUE_STATUSES, MAX_ISSUE_REQUEST_DEPTH } from "../index.js";
 import {
   addIssueCommentSchema,
   createIssueSchema,
@@ -366,6 +366,13 @@ describe("issue validators", () => {
       assigneeAgentId: "22222222-2222-4222-8222-222222222222",
       status: "backlog",
     }).status).toBe("backlog");
+  });
+
+  it("includes delivery statuses in ISSUE_STATUSES and the update schema", () => {
+    expect(ISSUE_STATUSES).toEqual(expect.arrayContaining(["pr_open", "merged", "in_production"]));
+    expect(updateIssueSchema.parse({ status: "pr_open" }).status).toBe("pr_open");
+    expect(updateIssueSchema.parse({ status: "merged" }).status).toBe("merged");
+    expect(updateIssueSchema.parse({ status: "in_production" }).status).toBe("in_production");
   });
 
   it("defaults issue work mode to standard and accepts ask, planning, and skill_test", () => {

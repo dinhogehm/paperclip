@@ -13001,7 +13001,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             and candidate_run.agent_id in (${governanceAgentIdList})
             and candidate_agent.adapter_type in ('codex_local', 'claude_local')
             and candidate_company.status = 'active'
-            and candidate_issue.status in ('todo', 'in_progress', 'in_review')
+            and candidate_issue.status in ('todo', 'in_progress', 'in_review', 'pr_open')
             and candidate_issue.hidden_at is null
             ${cutoffCondition}
             and (

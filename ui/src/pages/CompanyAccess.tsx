@@ -26,7 +26,7 @@ import { Link, Navigate } from "@/lib/router";
 import { queryKeys } from "@/lib/queryKeys";
 import { usePluginSlots } from "@/plugins/slots";
 
-const reassignmentIssueStatuses = "backlog,todo,in_progress,in_review,blocked,failed,timed_out";
+const reassignmentIssueStatuses = "backlog,todo,in_progress,in_review,pr_open,merged,in_production,blocked,failed,timed_out";
 type EditableMemberStatus = "pending" | "active" | "suspended";
 
 export function CompanyAccess() {

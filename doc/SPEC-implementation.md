@@ -273,7 +273,7 @@ Routine execution issues add a routine-scoped env overlay after project env and 
 - `parent_id` uuid fk `issues.id` null
 - `title` text not null
 - `description` text null
-- `status` enum: `backlog | todo | in_progress | in_review | done | blocked | cancelled`
+- `status` enum: `backlog | todo | in_progress | in_review | pr_open | merged | in_production | done | blocked | cancelled`
 - `priority` enum: `critical | high | medium | low`
 - `review_policy` nullable enum: `anyone | not_creator | human_only`; null is equivalent to `anyone`
 - `assignee_agent_id` uuid fk `agents.id` null
