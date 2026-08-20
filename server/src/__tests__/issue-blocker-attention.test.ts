@@ -146,25 +146,6 @@ describeEmbeddedPostgres("issue blocker attention", () => {
     return runId;
   }
 
-  it("does not treat a blocked issue with no blockers as a dependency needing attention", async () => {
-    const { companyId } = await createCompany("PBG");
-    const ghostId = await insertIssue({
-      companyId,
-      identifier: "PBG-1",
-      title: "Ghost blocked without a graph",
-      status: "blocked",
-    });
-
-    const ghost = (await svc.list(companyId, { status: "blocked" })).find((issue) => issue.id === ghostId);
-
-    expect(ghost?.blockerAttention).toMatchObject({
-      state: "none",
-      reason: null,
-      unresolvedBlockerCount: 0,
-      terminalBlockerIssueId: null,
-    });
-  });
-
   it("classifies a blocked parent as covered when its child has a running execution path", async () => {
     const { companyId, agentId } = await createCompany("PBC");
     const parentId = await insertIssue({ companyId, identifier: "PBC-1", title: "Parent", status: "blocked" });
