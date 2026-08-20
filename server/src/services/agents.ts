@@ -500,6 +500,16 @@ export function agentService(db: Db) {
       throw conflict("Terminated agents cannot be resumed");
     }
     if (
+      existing.status === "paused"
+      && data.status
+      && data.status !== "paused"
+      && options?.actorType !== "user"
+    ) {
+      throw conflict("Paused agents can only be resumed by the board", {
+        code: "paused_agent_board_resume_required",
+      });
+    }
+    if (
       existing.status === "pending_approval" &&
       data.status &&
       data.status !== "pending_approval" &&
