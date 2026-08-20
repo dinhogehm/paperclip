@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, syml
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+const ORIGINAL_PORT = process.env.PORT;
 const ORIGINAL_PAPERCLIP_API_URL = process.env.PAPERCLIP_API_URL;
 const ORIGINAL_PAPERCLIP_RUNTIME_API_URL = process.env.PAPERCLIP_RUNTIME_API_URL;
 const ORIGINAL_PAPERCLIP_RUNTIME_API_CANDIDATES_JSON = process.env.PAPERCLIP_RUNTIME_API_CANDIDATES_JSON;
@@ -590,6 +591,24 @@ describe("startServer authenticated auth origin setup", () => {
     createBetterAuthInstanceMock.mockReturnValue({});
     deriveAuthTrustedOriginsMock.mockReturnValue([]);
     process.env.BETTER_AUTH_SECRET = "test-secret";
+  });
+
+  it("pins the listen port to PORT so platform healthchecks can reach the process", async () => {
+    process.env.PORT = "3210";
+    try {
+      loadConfigMock.mockReturnValue(buildTestConfig({
+        port: 3210,
+      }));
+      detectPortMock.mockResolvedValueOnce(3211);
+
+      const started = await startServer();
+
+      expect(started.listenPort).toBe(3210);
+      expect(detectPortMock).not.toHaveBeenCalled();
+    } finally {
+      if (ORIGINAL_PORT === undefined) delete process.env.PORT;
+      else process.env.PORT = ORIGINAL_PORT;
+    }
   });
 
   it("derives trusted origins from the detected listen port before auth initializes", async () => {

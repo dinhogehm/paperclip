@@ -20,6 +20,7 @@ describe("Railway image contract", () => {
   it("builds the root Dockerfile whose production layer provides sqlite3 and tini", () => {
     expect(railwayConfig).toMatch(/^builder = "DOCKERFILE"$/m);
     expect(railwayConfig).toMatch(/^dockerfilePath = "Dockerfile"$/m);
+    expect(railwayConfig).toMatch(/^healthcheckTimeout = 600$/m);
     expect(dockerfile).toMatch(/^FROM production AS cloud$/m);
 
     const production = dockerStage("production");

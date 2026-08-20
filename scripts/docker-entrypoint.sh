@@ -40,9 +40,21 @@ fi
 # (init containers, backup restores, files written before a remap) is
 # found immediately and repaired recursively, a GID-only remap is caught,
 # and a fully-correct tree costs one metadata-only walk with no chown.
+#
+# Bound the recursive chown. A live Paperclip volume can be huge (agent
+# workspaces). An unbounded chown keeps Node from listening, so Railway's
+# /api/health window expires with "service unavailable" even when the
+# image itself is fine.
 home_dir="${PAPERCLIP_HOME:-/paperclip}"
 if [ -d "$home_dir" ] && [ -n "$(find "$home_dir" \( ! -user node -o ! -group node \) -print -quit 2>/dev/null)" ]; then
-    chown -R node:node "$home_dir"
+    if command -v timeout >/dev/null 2>&1; then
+        echo "docker-entrypoint.sh: repairing ownership of ${home_dir} (bounded)" >&2
+        timeout 25 chown -R node:node "$home_dir" || echo "docker-entrypoint.sh: chown timed out; starting anyway" >&2
+    else
+        chown -R node:node "$home_dir"
+    fi
+    # The mount root must be writable even if the recursive pass timed out.
+    chown node:node "$home_dir" || true
 fi
 
 exec gosu node "$@"
