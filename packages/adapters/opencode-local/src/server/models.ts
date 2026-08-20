@@ -3,7 +3,7 @@ import os from "node:os";
 import type { AdapterModel } from "@paperclipai/adapter-utils";
 import {
   asString,
-  ensurePathInEnv,
+  buildWorkloadProcessEnv,
   runChildProcess,
 } from "@paperclipai/adapter-utils/server-utils";
 import { isValidOpenCodeModelId } from "../index.js";
@@ -121,16 +121,22 @@ export async function discoverOpenCodeModels(input: {
   // When the server is started via `runuser -u <user>`, HOME may still
   // reflect the parent process (e.g. /root), causing OpenCode to miss
   // provider auth credentials stored under the target user's home.
-  let resolvedHome: string | undefined;
-  try {
-    resolvedHome = os.userInfo().homedir || undefined;
-  } catch {
-    // os.userInfo() throws a SystemError when the current UID has no
-    // /etc/passwd entry (e.g. `docker run --user 1234` with a minimal
-    // image). Fall back to process.env.HOME.
+  let resolvedHome = env.HOME?.trim() || undefined;
+  if (!resolvedHome) {
+    try {
+      resolvedHome = os.userInfo().homedir || undefined;
+    } catch {
+      // os.userInfo() throws a SystemError when the current UID has no
+      // /etc/passwd entry (e.g. `docker run --user 1234` with a minimal
+      // image). buildWorkloadProcessEnv falls back to the allowlisted host HOME.
+    }
   }
   // Prevent OpenCode from writing an opencode.json into the working directory.
-  const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...env, ...(resolvedHome ? { HOME: resolvedHome } : {}), OPENCODE_DISABLE_PROJECT_CONFIG: "true" }));
+  const runtimeEnv = normalizeEnv(buildWorkloadProcessEnv({
+    ...env,
+    ...(resolvedHome ? { HOME: resolvedHome } : {}),
+    OPENCODE_DISABLE_PROJECT_CONFIG: "true",
+  }));
 
   const result = await runChildProcess(
     `opencode-models-${Date.now()}-${Math.random().toString(16).slice(2)}`,

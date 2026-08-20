@@ -2335,17 +2335,91 @@ export function refreshPaperclipWorkspaceEnvForExecution(input: {
   return shapedWorkspaceEnv;
 }
 
-export function sanitizeInheritedPaperclipEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...baseEnv };
-  delete env.PAPERCLIPAI_CMD;
-  for (const key of Object.keys(env)) {
-    if (!key.startsWith("PAPERCLIP_")) continue;
-    if (key === "PAPERCLIP_RUNTIME_API_URL") continue;
-    if (key === "PAPERCLIP_LISTEN_HOST") continue;
-    if (key === "PAPERCLIP_LISTEN_PORT") continue;
-    delete env[key];
+const INHERITED_WORKLOAD_ENV_KEYS = new Set([
+  // Shell and platform state required to resolve tools and user-local installs.
+  "PATH",
+  "PATHEXT",
+  "HOME",
+  "USER",
+  "USERNAME",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "LOGNAME",
+  "SHELL",
+  "SYSTEMROOT",
+  "COMSPEC",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  // Locale, terminal, and non-secret network trust configuration.
+  "LANG",
+  "LANGUAGE",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LC_MESSAGES",
+  "LC_COLLATE",
+  "LC_NUMERIC",
+  "LC_TIME",
+  "LC_MONETARY",
+  "LC_PAPER",
+  "LC_MEASUREMENT",
+  "LC_NAME",
+  "LC_ADDRESS",
+  "LC_TELEPHONE",
+  "LC_IDENTIFICATION",
+  "TERM",
+  "TERM_PROGRAM",
+  "COLORTERM",
+  "NO_COLOR",
+  "FORCE_COLOR",
+  "NO_PROXY",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "NODE_EXTRA_CA_CERTS",
+  // User-local tool/cache roots. Authentication-specific homes such as
+  // CODEX_HOME, CLAUDE_CONFIG_DIR, DOCKER_CONFIG, and SSH_AUTH_SOCK are
+  // deliberately excluded and must be supplied by an explicit overlay.
+  "XDG_CONFIG_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  "XDG_RUNTIME_DIR",
+  "NVM_DIR",
+  "PNPM_HOME",
+  "VOLTA_HOME",
+  "BUN_INSTALL",
+  "CARGO_HOME",
+  "RUSTUP_HOME",
+  "GOPATH",
+  "PYENV_ROOT",
+  "RBENV_ROOT",
+  "SDKMAN_DIR",
+]);
+
+/**
+ * Select only non-secret shell/tool state before crossing the host ->
+ * workspace/agent process boundary. Everything else (including provider
+ * credentials and control-plane configuration) is fail-closed and must be
+ * supplied by an explicit adapter/project env overlay.
+ */
+export function sanitizeInheritedControlPlaneEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    const normalizedKey = key.toUpperCase();
+    if (!INHERITED_WORKLOAD_ENV_KEYS.has(normalizedKey)) {
+      continue;
+    }
+    env[key] = value;
   }
   return env;
+}
+
+/** @deprecated Use sanitizeInheritedControlPlaneEnv for the full host boundary. */
+export function sanitizeInheritedPaperclipEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return sanitizeInheritedControlPlaneEnv(baseEnv);
 }
 
 export function defaultPathForPlatform() {
@@ -2507,6 +2581,28 @@ export function ensurePathInEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (typeof env.PATH === "string" && env.PATH.length > 0) return env;
   if (typeof env.Path === "string" && env.Path.length > 0) return env;
   return { ...env, PATH: defaultPathForPlatform() };
+}
+
+/** Build the effective environment for an agent/workspace child process. */
+export function buildWorkloadProcessEnv(
+  explicitEnv: NodeJS.ProcessEnv,
+  inheritedEnv: NodeJS.ProcessEnv = process.env,
+  platform: string = process.platform,
+): Record<string, string> {
+  const merged = sanitizeInheritedControlPlaneEnv(inheritedEnv);
+  for (const [key, value] of Object.entries(explicitEnv)) {
+    if (platform === "win32") {
+      const normalizedKey = key.toUpperCase();
+      for (const inheritedKey of Object.keys(merged)) {
+        if (inheritedKey.toUpperCase() === normalizedKey) delete merged[inheritedKey];
+      }
+    }
+    merged[key] = value;
+  }
+  return Object.fromEntries(
+    Object.entries(ensurePathInEnv(merged))
+      .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
 }
 
 export async function ensureAbsoluteDirectory(
@@ -3305,10 +3401,7 @@ export async function runChildProcess(
 ): Promise<RunProcessResult> {
   const onLogError = opts.onLogError ?? ((err, id, msg) => console.warn({ err, runId: id }, msg));
   return new Promise<RunProcessResult>((resolve, reject) => {
-    const rawMerged: NodeJS.ProcessEnv = {
-      ...sanitizeInheritedPaperclipEnv(process.env),
-      ...opts.env,
-    };
+    const rawMerged: NodeJS.ProcessEnv = buildWorkloadProcessEnv(opts.env);
 
     // Strip Claude Code nesting-guard env vars so spawned `claude` processes
     // don't refuse to start with "cannot be launched inside another session".

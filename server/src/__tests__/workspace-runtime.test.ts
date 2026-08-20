@@ -401,23 +401,31 @@ afterEach(async () => {
 });
 
 describe("sanitizeRuntimeServiceBaseEnv", () => {
-  it("removes inherited Paperclip and pnpm auth flags before spawning runtime services", () => {
+  it("removes inherited control-plane state before spawning runtime services", () => {
     const sanitized = sanitizeRuntimeServiceBaseEnv({
       PATH: process.env.PATH,
       DATABASE_URL: "postgres://example.test/paperclip",
+      DATABASE_MIGRATION_URL: "postgres://example.test/migrations",
       PAPERCLIP_HOME: "/tmp/paperclip-home",
       PAPERCLIP_INSTANCE_ID: "runtime-instance",
+      BETTER_AUTH_SECRET: "host-only-secret",
+      NODE_ENV: "production",
       npm_config_tailscale_auth: "true",
       npm_config_authenticated_private: "true",
       HOST: "0.0.0.0",
+      OPENAI_API_KEY: "sk-workload",
     });
 
     expect(sanitized.PAPERCLIP_HOME).toBeUndefined();
     expect(sanitized.PAPERCLIP_INSTANCE_ID).toBeUndefined();
     expect(sanitized.DATABASE_URL).toBeUndefined();
+    expect(sanitized.DATABASE_MIGRATION_URL).toBeUndefined();
+    expect(sanitized.BETTER_AUTH_SECRET).toBeUndefined();
+    expect(sanitized.NODE_ENV).toBeUndefined();
     expect(sanitized.npm_config_tailscale_auth).toBeUndefined();
     expect(sanitized.npm_config_authenticated_private).toBeUndefined();
-    expect(sanitized.HOST).toBe("0.0.0.0");
+    expect(sanitized.HOST).toBeUndefined();
+    expect(sanitized.OPENAI_API_KEY).toBeUndefined();
   });
 });
 
@@ -1334,6 +1342,109 @@ describe("realizeExecutionWorkspace", () => {
     });
 
     await expect(fs.readFile(path.join(reused.cwd, ".paperclip-provision-created"), "utf8")).resolves.toBe("false\n");
+  });
+
+  it("isolates host secrets while forwarding explicit bindings and managed worktree state to provisioning", async () => {
+    const repoRoot = await createTempRepo();
+    await fs.mkdir(path.join(repoRoot, "scripts"), { recursive: true });
+    await fs.writeFile(
+      path.join(repoRoot, "scripts", "capture-provision-env.mjs"),
+      [
+        'import fs from "node:fs";',
+        "fs.writeFileSync('.paperclip-provision-env.json', JSON.stringify({",
+        "  nodeEnv: process.env.NODE_ENV ?? null,",
+        "  databaseUrl: process.env.DATABASE_URL ?? null,",
+        "  githubToken: process.env.GITHUB_TOKEN ?? null,",
+        "  anthropicKey: process.env.ANTHROPIC_API_KEY ?? null,",
+        "  paperclipHome: process.env.PAPERCLIP_HOME ?? null,",
+        "  worktreesDir: process.env.PAPERCLIP_WORKTREES_DIR ?? null,",
+        "  projectFlag: process.env.PROJECT_FLAG ?? null,",
+        "  workspaceBranch: process.env.PAPERCLIP_WORKSPACE_BRANCH ?? null,",
+        "  lowercaseWorkspaceBranch: process.env.paperclip_workspace_branch ?? null,",
+        "}));",
+      ].join("\n"),
+      "utf8",
+    );
+    await runGit(repoRoot, ["add", "scripts/capture-provision-env.mjs"]);
+    await runGit(repoRoot, ["commit", "-m", "Add provision env capture"]);
+
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    const previousGithubToken = process.env.GITHUB_TOKEN;
+    const previousAnthropicKey = process.env.ANTHROPIC_API_KEY;
+    const previousWorktreesDir = process.env.PAPERCLIP_WORKTREES_DIR;
+    process.env.NODE_ENV = "production";
+    process.env.DATABASE_URL = "postgres://paperclip.test/control-plane";
+    process.env.PAPERCLIP_HOME = "/srv/paperclip";
+    process.env.GITHUB_TOKEN = "github-host-secret";
+    process.env.ANTHROPIC_API_KEY = "anthropic-host-secret";
+    process.env.PAPERCLIP_WORKTREES_DIR = "/srv/paperclip/worktrees";
+
+    try {
+      const workspace = await realizeExecutionWorkspace({
+        base: {
+          baseCwd: repoRoot,
+          source: "project_primary",
+          projectId: "project-1",
+          workspaceId: "workspace-1",
+          repoUrl: null,
+          repoRef: "HEAD",
+        },
+        config: {
+          workspaceStrategy: {
+            type: "git_worktree",
+            branchTemplate: "{{issue.identifier}}-{{slug}}",
+            provisionCommand: `${JSON.stringify(process.execPath)} ./scripts/capture-provision-env.mjs`,
+          },
+        },
+        issue: {
+          id: "issue-env-isolation",
+          identifier: "PAP-3030",
+          title: "Isolate provision environment",
+        },
+        agent: {
+          id: "agent-1",
+          name: "Codex Coder",
+          companyId: "company-1",
+        },
+        provisionEnv: {
+          NODE_ENV: "test",
+          DATABASE_URL: "postgres://workspace.test/app",
+          GITHUB_TOKEN: "github-explicit-binding",
+          PROJECT_FLAG: "bound",
+          paperclip_workspace_branch: "config-must-not-override-managed-state",
+        },
+      });
+
+      await expect(
+        fs.readFile(path.join(workspace.cwd, ".paperclip-provision-env.json"), "utf8")
+          .then((contents) => JSON.parse(contents)),
+      ).resolves.toEqual({
+        nodeEnv: "test",
+        databaseUrl: "postgres://workspace.test/app",
+        githubToken: "github-explicit-binding",
+        anthropicKey: null,
+        paperclipHome: null,
+        worktreesDir: "/srv/paperclip/worktrees",
+        projectFlag: "bound",
+        workspaceBranch: "PAP-3030-isolate-provision-environment",
+        lowercaseWorkspaceBranch: null,
+      });
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      if (previousGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previousGithubToken;
+      if (previousAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = previousAnthropicKey;
+      if (previousWorktreesDir === undefined) delete process.env.PAPERCLIP_WORKTREES_DIR;
+      else process.env.PAPERCLIP_WORKTREES_DIR = previousWorktreesDir;
+    }
   });
 
   it("uses the latest repo-managed provision script when reusing an existing worktree", async () => {
@@ -3212,6 +3323,7 @@ describe("realizeExecutionWorkspace", () => {
         "#!/usr/bin/env bash",
         "set -euo pipefail",
         "printf 'reprovisioned\\n' > .paperclip-restored-state",
+        "printf '%s\\n' \"${PROJECT_FLAG:-}\" > .paperclip-restored-project-env",
       ].join("\n"),
       "utf8",
     );
@@ -3282,9 +3394,14 @@ describe("realizeExecutionWorkspace", () => {
         name: "Codex Coder",
         companyId: "company-1",
       },
+      provisionEnv: {
+        PROJECT_FLAG: "restored-explicit-binding",
+      },
     });
 
     await expect(fs.readFile(path.join(initial.cwd, ".paperclip-restored-state"), "utf8")).resolves.toBe("reprovisioned\n");
+    await expect(fs.readFile(path.join(initial.cwd, ".paperclip-restored-project-env"), "utf8"))
+      .resolves.toBe("restored-explicit-binding\n");
   }, 15_000);
 
   it("auto-detects the default branch when baseRef is not configured", async () => {
@@ -3713,6 +3830,7 @@ describe("ensureRuntimeServicesForRun", () => {
   function runtimeProvisionStartInput(input: {
     workspace: RealizedExecutionWorkspace;
     config: Record<string, unknown>;
+    adapterEnv?: Record<string, string>;
     recorder?: WorkspaceOperationRecorder;
     onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
   }) {
@@ -3731,7 +3849,7 @@ describe("ensureRuntimeServicesForRun", () => {
       workspace: input.workspace,
       executionWorkspaceId: "execution-workspace-1",
       config: input.config,
-      adapterEnv: {},
+      adapterEnv: input.adapterEnv ?? {},
       recorder: input.recorder,
       onLog: input.onLog,
     };
@@ -3779,6 +3897,68 @@ describe("ensureRuntimeServicesForRun", () => {
       });
       await fs.rm(workspaceRoot, { recursive: true, force: true });
       restorePaperclipEnv();
+    }
+  });
+
+  it("sanitizes host state but preserves explicit runtime provision environment overrides", async () => {
+    const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-runtime-provision-env-"));
+    const restorePaperclipEnv = configureRuntimeProvisionTestHome(workspaceRoot, "runtime-provision-env");
+    const capturePath = path.join(workspaceRoot, "runtime-provision-env.json");
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    const previousGithubToken = process.env.GITHUB_TOKEN;
+    const previousWorktreesDir = process.env.PAPERCLIP_WORKTREES_DIR;
+    process.env.NODE_ENV = "production";
+    process.env.DATABASE_URL = "postgres://paperclip.test/control-plane";
+    process.env.GITHUB_TOKEN = "github-host-secret";
+    process.env.PAPERCLIP_WORKTREES_DIR = "/srv/paperclip/worktrees";
+    const provisionScript = [
+      "const fs = require('node:fs');",
+      `fs.writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({`,
+      "  nodeEnv: process.env.NODE_ENV ?? null,",
+      "  databaseUrl: process.env.DATABASE_URL ?? null,",
+      "  githubToken: process.env.GITHUB_TOKEN ?? null,",
+      "  worktreesDir: process.env.PAPERCLIP_WORKTREES_DIR ?? null,",
+      "  agentId: process.env.PAPERCLIP_AGENT_ID ?? null,",
+      "}));",
+    ].join(" ");
+    const config = runtimeProvisionTestConfig({
+      provisionCommand: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(provisionScript)}`,
+    });
+    const workspace = buildWorkspace(workspaceRoot);
+
+    try {
+      await startRuntimeServicesForWorkspaceControl(runtimeProvisionStartInput({
+        workspace,
+        config,
+        adapterEnv: {
+          NODE_ENV: "test",
+          DATABASE_URL: "postgres://workspace.test/app",
+        },
+      }));
+
+      await expect(fs.readFile(capturePath, "utf8").then((contents) => JSON.parse(contents))).resolves.toEqual({
+        nodeEnv: "test",
+        databaseUrl: "postgres://workspace.test/app",
+        githubToken: null,
+        worktreesDir: null,
+        agentId: "agent-1",
+      });
+    } finally {
+      await stopRuntimeServicesForExecutionWorkspace({
+        executionWorkspaceId: "execution-workspace-1",
+        workspaceCwd: workspaceRoot,
+      });
+      await fs.rm(workspaceRoot, { recursive: true, force: true });
+      restorePaperclipEnv();
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+      if (previousGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = previousGithubToken;
+      if (previousWorktreesDir === undefined) delete process.env.PAPERCLIP_WORKTREES_DIR;
+      else process.env.PAPERCLIP_WORKTREES_DIR = previousWorktreesDir;
     }
   });
 

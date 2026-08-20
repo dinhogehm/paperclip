@@ -289,7 +289,13 @@ describe("gemini remote execution", () => {
         transport: "sandbox",
         providerKey: "kubernetes",
         remoteCwd: "/remote/workspace",
-        runner: { execute: runnerExecute },
+        runner: {
+          execute: runnerExecute,
+          // This auth-focused fixture does not emulate the sandbox filesystem;
+          // paired native sync hooks keep setup/teardown off archive RPCs.
+          syncIn: async () => ({ operations: [] }),
+          syncOut: async () => ({ operations: [] }),
+        },
       },
       onLog: async () => {},
     });

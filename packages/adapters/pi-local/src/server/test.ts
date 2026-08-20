@@ -6,7 +6,7 @@ import type {
 import {
   asString,
   parseObject,
-  ensurePathInEnv,
+  buildWorkloadProcessEnv,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   asStringArray,
@@ -125,7 +125,7 @@ export async function testEnvironment(
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
-  const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...env }));
+  const runtimeEnv = normalizeEnv(buildWorkloadProcessEnv(env));
 
   const cwdInvalid = checks.some((check) => check.code === "pi_cwd_invalid");
   if (cwdInvalid) {

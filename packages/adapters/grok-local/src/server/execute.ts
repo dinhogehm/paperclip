@@ -24,8 +24,8 @@ import {
   asStringArray,
   buildInvocationEnvForLogs,
   buildPaperclipEnv,
+  buildWorkloadProcessEnv,
   ensureAbsoluteDirectory,
-  ensurePathInEnv,
   joinPromptSections,
   materializePaperclipSkillCopy,
   parseObject,
@@ -346,12 +346,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
 
     const runtimeExecutionTarget = overrideAdapterExecutionTargetRemoteCwd(executionTarget, effectiveExecutionCwd);
-    const effectiveEnv = Object.fromEntries(
-      Object.entries({ ...process.env, ...env }).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string",
-      ),
-    );
-    const runtimeEnv = ensurePathInEnv(effectiveEnv);
+    const runtimeEnv = buildWorkloadProcessEnv(env);
     await ensureAdapterExecutionTargetCommandResolvable(command, executionTarget, cwd, runtimeEnv, {
       installCommand: ctx.runtimeCommandSpec?.installCommand ?? null,
       timeoutSec,
@@ -362,7 +357,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       includeRuntimeKeys: ["HOME"],
       resolvedCommand,
     });
-    const billingType = resolveBillingType(effectiveEnv);
+    const billingType = resolveBillingType(runtimeEnv);
 
     const runtimeSessionParams = parseObject(runtime.sessionParams);
     const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");

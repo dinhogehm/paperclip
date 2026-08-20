@@ -33,10 +33,10 @@ import {
   asNumber,
   parseObject,
   buildPaperclipEnv,
+  buildWorkloadProcessEnv,
   buildInvocationEnvForLogs,
   ensureAbsoluteDirectory,
   ensurePaperclipSkillSymlink,
-  ensurePathInEnv,
   refreshPaperclipWorkspaceEnvForExecution,
   readPaperclipRuntimeSkillEntries,
   readPaperclipIssueWorkModeFromContext,
@@ -961,11 +961,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         Object.assign(env, paperclipBridge.env);
       }
     }
-    const effectiveEnv = Object.fromEntries(
-      Object.entries({ ...process.env, ...env }).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string",
-      ),
-    );
+    const effectiveEnv = buildWorkloadProcessEnv(env);
     const billingType = resolveCodexBillingType(effectiveEnv);
     const networkScope = parseLocalProcessNetworkScope(config.networkScope);
     const filesystemScope = parseLocalProcessFilesystemScope(config.filesystemScope);
@@ -999,11 +995,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         `[paperclip] Confining Codex with ${scopes} scope.\n`,
       );
     }
-    const runtimeEnv = Object.fromEntries(
-      Object.entries(ensurePathInEnv(effectiveEnv)).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string",
-      ),
-    );
+    const runtimeEnv = effectiveEnv;
     await ensureAdapterExecutionTargetRuntimeCommandInstalled({
       runId,
       target: executionTarget,

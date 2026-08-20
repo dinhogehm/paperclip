@@ -37,8 +37,8 @@ import {
   asString,
   buildInvocationEnvForLogs,
   buildPaperclipEnv,
+  buildWorkloadProcessEnv,
   ensureAbsoluteDirectory,
-  ensurePathInEnv,
   ensurePaperclipSkillSymlink,
   isForbiddenConfigEnvKey,
   isPaperclipRuntimeEnvKey,
@@ -1687,7 +1687,7 @@ async function buildRuntime(input: {
   if (acpxAgent === "gemini" && agentCommandShell) {
     const normalized = await normalizeGeminiAcpCommandShell(
       agentCommandShell,
-      ensurePathInEnv({ ...process.env, ...env }),
+      buildWorkloadProcessEnv(env),
     );
     if (normalized !== agentCommandShell) {
       agentCommandShell = normalized;
@@ -2177,17 +2177,13 @@ async function applySessionConfigOptions(input: {
 }
 
 /**
- * Build the process-session launch env: the host env overlaid with the run's
- * `env` (so the merged paperclip bridge vars win) and a guaranteed `PATH`,
- * narrowed to string values. Shared by the remote concurrent bring-up and the
- * local / runner-less lane so both resolve the runtime env identically.
+ * Build the process-session launch env: sanitized host shell/provider state
+ * overlaid with the run's explicit `env` (so configured values and merged
+ * Paperclip bridge vars win) plus a guaranteed `PATH`. Shared by the remote
+ * concurrent bring-up and local / runner-less lanes.
  */
 function resolveRuntimeEnv(env: Record<string, string>): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(ensurePathInEnv({ ...process.env, ...env })).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string",
-    ),
-  );
+  return buildWorkloadProcessEnv(env);
 }
 
 /**

@@ -269,6 +269,10 @@ printf '%s\\n' '{"type":"result","subtype":"success","session_id":"cursor-sessio
       commands: [] as string[],
     };
     const runner = {
+      // The fixture operates on a local mirror and does not need archive-based
+      // sandbox restoration during teardown.
+      syncIn: async () => ({ operations: [] }),
+      syncOut: async () => ({ operations: [] }),
       execute: async (input: { command: string; args?: string[]; env?: Record<string, string> }) => {
         runnerState.commands.push(input.command);
         if (input.command === "sh") {

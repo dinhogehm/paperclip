@@ -72,6 +72,10 @@ const payload = {
   paperclipApiUrl: process.env.PAPERCLIP_API_URL || null,
   paperclipApiKey: process.env.PAPERCLIP_API_KEY || null,
   paperclipApiBridgeMode: process.env.PAPERCLIP_API_BRIDGE_MODE || null,
+  nodeEnv: process.env.NODE_ENV || null,
+  databaseUrl: process.env.DATABASE_URL || null,
+  betterAuthSecret: process.env.BETTER_AUTH_SECRET || null,
+  paperclipHome: process.env.PAPERCLIP_HOME || null,
 };
 if (capturePath) {
   fs.writeFileSync(capturePath, JSON.stringify(payload), "utf8");
@@ -173,6 +177,10 @@ type CapturePayload = {
   paperclipApiUrl?: string | null;
   paperclipApiKey?: string | null;
   paperclipApiBridgeMode?: string | null;
+  nodeEnv?: string | null;
+  databaseUrl?: string | null;
+  betterAuthSecret?: string | null;
+  paperclipHome?: string | null;
   appendedSystemPromptFilePath?: string | null;
   appendedSystemPromptFileContents?: string | null;
 };
@@ -350,6 +358,64 @@ function createLocalSandboxRunner() {
 }
 
 describe("claude execute", () => {
+  it("isolates the effective Claude process env while preserving explicit overrides", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-env-isolation-"));
+    const { workspace, commandPath, capturePath, restore } = await setupExecuteEnv(root);
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    const previousBetterAuthSecret = process.env.BETTER_AUTH_SECRET;
+    const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+    process.env.NODE_ENV = "production";
+    process.env.DATABASE_URL = "postgres://paperclip.test/control-plane";
+    process.env.BETTER_AUTH_SECRET = "host-only-secret";
+    process.env.PAPERCLIP_HOME = path.join(root, "paperclip-host");
+
+    try {
+      const result = await execute({
+        runId: "run-env-isolation",
+        agent: {
+          id: "agent-1",
+          companyId: "co-1",
+          name: "Claude Coder",
+          adapterType: "claude_local",
+          adapterConfig: { engine: "cli" },
+        },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          engine: "cli",
+          command: commandPath,
+          cwd: workspace,
+          env: {
+            PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+            NODE_ENV: "test",
+          },
+          promptTemplate: "Do work.",
+        },
+        context: {},
+        authToken: "tok",
+        onLog: async () => {},
+      });
+
+      expect(result.exitCode).toBe(0);
+      const captured = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
+      expect(captured.nodeEnv).toBe("test");
+      expect(captured.databaseUrl).toBeNull();
+      expect(captured.betterAuthSecret).toBeNull();
+      expect(captured.paperclipHome).toBeNull();
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+      if (previousBetterAuthSecret === undefined) delete process.env.BETTER_AUTH_SECRET;
+      else process.env.BETTER_AUTH_SECRET = previousBetterAuthSecret;
+      if (previousPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousPaperclipHome;
+      restore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses a strict per-agent MCP config only when managed servers are present", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-claude-mcp-config-"));
     const { workspace, commandPath, capturePath, restore } = await setupExecuteEnv(root);
@@ -741,7 +807,7 @@ describe("claude execute", () => {
     const previousClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
     process.env.HOME = root;
     process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
-    process.env.CLAUDE_CONFIG_DIR = claudeConfigDir;
+    process.env.CLAUDE_CONFIG_DIR = path.join(root, "host-claude-config-must-not-leak");
 
     let loggedCommand: string | null = null;
     let loggedEnv: Record<string, string> = {};
@@ -767,6 +833,7 @@ describe("claude execute", () => {
           cwd: workspace,
           env: {
             PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+            CLAUDE_CONFIG_DIR: claudeConfigDir,
           },
           promptTemplate: "Follow the paperclip heartbeat.",
         },

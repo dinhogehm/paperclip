@@ -7,6 +7,10 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AdapterRuntimeServiceReport } from "@paperclipai/adapter-utils";
+import {
+  buildWorkloadProcessEnv,
+  sanitizeInheritedControlPlaneEnv,
+} from "@paperclipai/adapter-utils/server-utils";
 import type { Db } from "@paperclipai/db";
 import { executionWorkspaces, issueComments, issues, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
 import {
@@ -350,16 +354,7 @@ export async function ensureServerWorkspaceLinksCurrent(
 }
 
 export function sanitizeRuntimeServiceBaseEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...baseEnv };
-  for (const key of Object.keys(env)) {
-    if (key.startsWith("PAPERCLIP_")) {
-      delete env[key];
-    }
-  }
-  delete env.DATABASE_URL;
-  delete env.npm_config_tailscale_auth;
-  delete env.npm_config_authenticated_private;
-  return env;
+  return sanitizeInheritedControlPlaneEnv(baseEnv);
 }
 
 function stableRuntimeServiceId(input: {
@@ -2444,6 +2439,14 @@ function terminateChildProcess(child: ChildProcess) {
   }
 }
 
+function setManagedProcessEnvValue(env: NodeJS.ProcessEnv, key: string, value: string) {
+  const normalizedKey = key.toUpperCase();
+  for (const existingKey of Object.keys(env)) {
+    if (existingKey.toUpperCase() === normalizedKey) delete env[existingKey];
+  }
+  env[key] = value;
+}
+
 function buildWorkspaceCommandEnv(input: {
   base: ExecutionWorkspaceInput;
   repoRoot: string;
@@ -2452,27 +2455,36 @@ function buildWorkspaceCommandEnv(input: {
   issue: ExecutionWorkspaceIssueRef | null;
   agent: ExecutionWorkspaceAgentRef;
   created: boolean;
+  overrides?: Record<string, string>;
+  managedWorktreesDir?: string | null;
 }) {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  env.PAPERCLIP_WORKSPACE_CWD = input.worktreePath;
-  env.PAPERCLIP_WORKSPACE_PATH = input.worktreePath;
-  env.PAPERCLIP_WORKSPACE_WORKTREE_PATH = input.worktreePath;
-  env.PAPERCLIP_WORKSPACE_BRANCH = input.branchName;
-  env.PAPERCLIP_WORKSPACE_BASE_CWD = input.base.baseCwd;
-  env.PAPERCLIP_WORKSPACE_REPO_ROOT = input.repoRoot;
-  env.PAPERCLIP_WORKSPACE_SOURCE = input.base.source;
-  env.PAPERCLIP_WORKSPACE_REPO_REF = input.base.repoRef ?? "";
-  env.PAPERCLIP_WORKSPACE_REPO_URL = input.base.repoUrl ?? "";
-  env.PAPERCLIP_WORKSPACE_CREATED = input.created ? "true" : "false";
-  env.PAPERCLIP_PROJECT_ID = input.base.projectId ?? "";
-  env.PAPERCLIP_PROJECT_WORKSPACE_ID = input.base.workspaceId ?? "";
-  env.PAPERCLIP_AGENT_ID = input.agent.id ?? "";
-  env.PAPERCLIP_AGENT_NAME = input.agent.name;
-  env.PAPERCLIP_COMPANY_ID = input.agent.companyId;
-  env.PAPERCLIP_ISSUE_ID = input.issue?.id ?? "";
-  env.PAPERCLIP_ISSUE_IDENTIFIER = input.issue?.identifier ?? "";
-  env.PAPERCLIP_ISSUE_TITLE = input.issue?.title ?? "";
-  env.PAPERCLIP_ISSUE_WORK_MODE = input.issue?.workMode ?? "";
+  const env: NodeJS.ProcessEnv = buildWorkloadProcessEnv(input.overrides ?? {}, process.env);
+  const managedWorktreesDir = input.managedWorktreesDir?.trim();
+  const managedEnv: Record<string, string> = {
+    ...(managedWorktreesDir ? { PAPERCLIP_WORKTREES_DIR: managedWorktreesDir } : {}),
+    PAPERCLIP_WORKSPACE_CWD: input.worktreePath,
+    PAPERCLIP_WORKSPACE_PATH: input.worktreePath,
+    PAPERCLIP_WORKSPACE_WORKTREE_PATH: input.worktreePath,
+    PAPERCLIP_WORKSPACE_BRANCH: input.branchName,
+    PAPERCLIP_WORKSPACE_BASE_CWD: input.base.baseCwd,
+    PAPERCLIP_WORKSPACE_REPO_ROOT: input.repoRoot,
+    PAPERCLIP_WORKSPACE_SOURCE: input.base.source,
+    PAPERCLIP_WORKSPACE_REPO_REF: input.base.repoRef ?? "",
+    PAPERCLIP_WORKSPACE_REPO_URL: input.base.repoUrl ?? "",
+    PAPERCLIP_WORKSPACE_CREATED: input.created ? "true" : "false",
+    PAPERCLIP_PROJECT_ID: input.base.projectId ?? "",
+    PAPERCLIP_PROJECT_WORKSPACE_ID: input.base.workspaceId ?? "",
+    PAPERCLIP_AGENT_ID: input.agent.id ?? "",
+    PAPERCLIP_AGENT_NAME: input.agent.name,
+    PAPERCLIP_COMPANY_ID: input.agent.companyId,
+    PAPERCLIP_ISSUE_ID: input.issue?.id ?? "",
+    PAPERCLIP_ISSUE_IDENTIFIER: input.issue?.identifier ?? "",
+    PAPERCLIP_ISSUE_TITLE: input.issue?.title ?? "",
+    PAPERCLIP_ISSUE_WORK_MODE: input.issue?.workMode ?? "",
+  };
+  for (const [key, value] of Object.entries(managedEnv)) {
+    setManagedProcessEnvValue(env, key, value);
+  }
   return env;
 }
 
@@ -2685,6 +2697,7 @@ async function provisionExecutionWorktree(input: {
   issue: ExecutionWorkspaceIssueRef | null;
   agent: ExecutionWorkspaceAgentRef;
   created: boolean;
+  provisionEnv?: Record<string, string>;
   recorder?: WorkspaceOperationRecorder | null;
 }) {
   const provisionCommand = asString(input.strategy.provisionCommand, "").trim();
@@ -2704,6 +2717,8 @@ async function provisionExecutionWorktree(input: {
       issue: input.issue,
       agent: input.agent,
       created: input.created,
+      overrides: input.provisionEnv,
+      managedWorktreesDir: process.env.PAPERCLIP_WORKTREES_DIR ?? null,
     }),
     label: `Execution workspace provision command "${provisionCommand}"`,
     metadata: {
@@ -2773,6 +2788,7 @@ export async function realizeExecutionWorkspace(input: {
   issue: ExecutionWorkspaceIssueRef | null;
   agent: ExecutionWorkspaceAgentRef;
   heartbeatRunId?: string | null;
+  provisionEnv?: Record<string, string>;
   enableWorkspaceBranchReconcileForward?: boolean;
   enableWorkspaceDirtyQuarantineRepair?: boolean;
   recorder?: WorkspaceOperationRecorder | null;
@@ -2873,6 +2889,7 @@ export async function realizeExecutionWorkspace(input: {
       issue: input.issue,
       agent: input.agent,
       created: false,
+      provisionEnv: input.provisionEnv,
       recorder: input.recorder ?? null,
     });
     return {
@@ -3014,6 +3031,7 @@ export async function realizeExecutionWorkspace(input: {
     issue: input.issue,
     agent: input.agent,
     created: true,
+    provisionEnv: input.provisionEnv,
     recorder: input.recorder ?? null,
   });
 
@@ -3053,6 +3071,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
   issue: ExecutionWorkspaceIssueRef | null;
   agent: ExecutionWorkspaceAgentRef;
   heartbeatRunId?: string | null;
+  provisionEnv?: Record<string, string>;
   enableWorkspaceBranchReconcileForward?: boolean;
   enableWorkspaceDirtyQuarantineRepair?: boolean;
   recorder?: WorkspaceOperationRecorder | null;
@@ -3170,6 +3189,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
         issue: input.issue,
         agent: input.agent,
         created: false,
+        provisionEnv: input.provisionEnv,
         recorder: input.recorder ?? null,
       });
     }
@@ -3263,6 +3283,7 @@ export async function ensurePersistedExecutionWorkspaceAvailable(input: {
     issue: input.issue,
     agent: input.agent,
     created,
+    provisionEnv: input.provisionEnv,
     recorder: input.recorder ?? null,
   });
 
@@ -3755,14 +3776,13 @@ function resolveWorkspaceCommandExecution(input: {
     renderTemplate(asString(input.command.cwd, "."), templateData),
     input.workspace.cwd,
   );
-  const env = {
-    ...sanitizeRuntimeServiceBaseEnv(process.env),
+  const env = buildWorkloadProcessEnv({
     ...input.adapterEnv,
     ...renderRuntimeServiceEnv({
       envConfig: parseObject(input.command.env),
       templateData,
     }),
-  } as Record<string, string>;
+  }, process.env);
 
   return {
     name,
@@ -4238,6 +4258,7 @@ async function runRuntimeProvisionWithWorkspaceMutex(input: StartLocalRuntimeSer
       issue: input.issue,
       agent: input.agent,
       created: input.workspace.created,
+      overrides: input.adapterEnv,
     }),
     label: `Runtime provision command "${command}"`,
     metadata: {
@@ -4358,16 +4379,13 @@ async function spawnLocalRuntimeService(input: StartLocalRuntimeServiceInput): P
     port === identityPort
       ? identity.serviceCwd
       : resolveConfiguredPath(renderTemplate(asString(input.service.cwd, "."), templateData), input.workspace.cwd);
-  const env: Record<string, string> = {
-    ...sanitizeRuntimeServiceBaseEnv(process.env),
+  const env = buildWorkloadProcessEnv({
     ...input.adapterEnv,
-  } as Record<string, string>;
-  for (const [key, value] of Object.entries(renderRuntimeServiceEnv({ envConfig, templateData }))) {
-    env[key] = value;
-  }
+    ...renderRuntimeServiceEnv({ envConfig, templateData }),
+  }, process.env);
   if (port) {
     const portEnvKey = asString(portConfig.envKey, "PORT");
-    env[portEnvKey] = String(port);
+    setManagedProcessEnvValue(env, portEnvKey, String(port));
   }
 
   const expose = parseObject(input.service.expose);

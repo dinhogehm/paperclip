@@ -21,6 +21,10 @@ const payload = {
   paperclipApiUrl: process.env.PAPERCLIP_API_URL || null,
   paperclipApiKey: process.env.PAPERCLIP_API_KEY || null,
   paperclipApiBridgeMode: process.env.PAPERCLIP_API_BRIDGE_MODE || null,
+  nodeEnv: process.env.NODE_ENV || null,
+  databaseUrl: process.env.DATABASE_URL || null,
+  betterAuthSecret: process.env.BETTER_AUTH_SECRET || null,
+  paperclipHome: process.env.PAPERCLIP_HOME || null,
   paperclipEnvKeys: Object.keys(process.env)
     .filter((key) => key.startsWith("PAPERCLIP_"))
     .sort(),
@@ -54,6 +58,10 @@ type CapturePayload = {
   paperclipApiUrl?: string | null;
   paperclipApiKey?: string | null;
   paperclipApiBridgeMode?: string | null;
+  nodeEnv?: string | null;
+  databaseUrl?: string | null;
+  betterAuthSecret?: string | null;
+  paperclipHome?: string | null;
   paperclipEnvKeys: string[];
 };
 
@@ -143,11 +151,17 @@ describe("codex execute", () => {
     const previousPaperclipInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
     const previousPaperclipInWorktree = process.env.PAPERCLIP_IN_WORKTREE;
     const previousCodexHome = process.env.CODEX_HOME;
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    const previousBetterAuthSecret = process.env.BETTER_AUTH_SECRET;
     process.env.HOME = root;
     process.env.PAPERCLIP_HOME = paperclipHome;
     delete process.env.PAPERCLIP_INSTANCE_ID;
     delete process.env.PAPERCLIP_IN_WORKTREE;
     process.env.CODEX_HOME = sharedCodexHome;
+    process.env.NODE_ENV = "production";
+    process.env.DATABASE_URL = "postgres://paperclip.test/control-plane";
+    process.env.BETTER_AUTH_SECRET = "host-only-secret";
 
     try {
       const logs: LogEntry[] = [];
@@ -172,6 +186,7 @@ describe("codex execute", () => {
           cwd: workspace,
           env: {
             PAPERCLIP_TEST_CAPTURE_PATH: capturePath,
+            NODE_ENV: "test",
           },
           promptTemplate: "Follow the paperclip heartbeat.",
         },
@@ -190,6 +205,10 @@ describe("codex execute", () => {
 
       const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
       expect(capture.codexHome).toBe(managedCodexHome);
+      expect(capture.nodeEnv).toBe("test");
+      expect(capture.databaseUrl).toBeNull();
+      expect(capture.betterAuthSecret).toBeNull();
+      expect(capture.paperclipHome).toBeNull();
 
       const managedAuth = path.join(managedCodexHome, "auth.json");
       const managedConfig = path.join(managedCodexHome, "config.toml");
@@ -215,6 +234,12 @@ describe("codex execute", () => {
       else process.env.PAPERCLIP_IN_WORKTREE = previousPaperclipInWorktree;
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previousCodexHome;
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+      if (previousBetterAuthSecret === undefined) delete process.env.BETTER_AUTH_SECRET;
+      else process.env.BETTER_AUTH_SECRET = previousBetterAuthSecret;
       await fs.rm(root, { recursive: true, force: true });
     }
   });
