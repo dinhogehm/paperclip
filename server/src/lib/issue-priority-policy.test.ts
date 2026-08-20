@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   NURIA_OPS_COMPANY_ID,
+  isNuriaOpsCompany,
   resolveBoardIssuePriority,
   shouldEnforceBoardPriorityPolicy,
 } from "./issue-priority-policy.js";
 
 describe("shouldEnforceBoardPriorityPolicy", () => {
   it("applies only to the nuria-ops company", () => {
+    expect(isNuriaOpsCompany(NURIA_OPS_COMPANY_ID)).toBe(true);
     expect(shouldEnforceBoardPriorityPolicy(NURIA_OPS_COMPANY_ID)).toBe(true);
     expect(shouldEnforceBoardPriorityPolicy("00000000-0000-0000-0000-000000000000")).toBe(false);
   });

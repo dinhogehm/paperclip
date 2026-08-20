@@ -28,6 +28,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import { parseObject, asBoolean, asNumber } from "../../adapters/utils.js";
+import { isNuriaOpsCompany } from "../../lib/issue-priority-policy.js";
 import { runningProcesses } from "../../adapters/index.js";
 import { visibleIssueCondition } from "../issue-visibility.js";
 import { forbidden, notFound } from "../../errors.js";
@@ -3336,8 +3337,13 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       });
     }
     const blockerIds = await existingUnresolvedBlockerIssueIds(input.issue.companyId, input.issue.id);
+    // nuria-ops: a stranded run is not a dependency. Parking it on `blocked`
+    // with an empty graph filled /decisions with "Blocks 0 tasks".
+    const nextStatus = blockerIds.length > 0 || !isNuriaOpsCompany(input.issue.companyId)
+      ? "blocked"
+      : "todo";
     const updated = await issuesSvc.update(input.issue.id, {
-      status: "blocked",
+      status: nextStatus,
       blockedByIssueIds: blockerIds,
       assigneeAgentId: recoveryAction.ownerAgentId ?? input.issue.assigneeAgentId,
     });
@@ -3449,7 +3455,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       entityId: input.issue.id,
       details: {
         identifier: input.issue.identifier,
-        status: "blocked",
+        status: nextStatus,
         previousStatus: input.previousStatus,
         source: input.recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON
           ? "recovery.reconcile_successful_run_handoff_missing_state"

@@ -2754,11 +2754,10 @@ async function listIssueBlockerAttentionMap(
       return blocker?.status !== "done" || pendingFinalizeBlockerIssueIds.has(edge.blockerIssueId);
     });
     if (topLevelEdges.length === 0) {
-      attentionMap.set(root.id, createIssueBlockerAttention({
-        state: "needs_attention",
-        reason: "attention_required",
-        terminalBlockerIssueId: root.id,
-      }));
+      // A blocked row with no blocker graph is a stranded/ghost ticket, not a
+      // dependency decision. Emitting needs_attention here filled /decisions
+      // with "Blocked dependency · Blocks 0 tasks".
+      attentionMap.set(root.id, createIssueBlockerAttention());
       continue;
     }
 

@@ -5,8 +5,12 @@ export type BoardIssuePriority = "critical" | "high" | "medium" | "low";
 const HELPDESK_TAG_RE = /\[helpdesk\]/i;
 const HOTFIX_TAG_RE = /\[hotfix\]/i;
 
-export function shouldEnforceBoardPriorityPolicy(companyId: string | null | undefined): boolean {
+export function isNuriaOpsCompany(companyId: string | null | undefined): boolean {
   return companyId === NURIA_OPS_COMPANY_ID;
+}
+
+export function shouldEnforceBoardPriorityPolicy(companyId: string | null | undefined): boolean {
+  return isNuriaOpsCompany(companyId);
 }
 
 function hasHotfixLabel(labelNames: readonly string[] | null | undefined): boolean {
