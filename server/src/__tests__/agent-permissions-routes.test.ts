@@ -2,7 +2,7 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPENCODE_LOCAL_MODEL } from "@paperclipai/adapter-opencode-local";
-import { LOW_TRUST_REVIEW_PRESET } from "@paperclipai/shared";
+import { INBOX_MINE_ISSUE_STATUS_FILTER, LOW_TRUST_REVIEW_PRESET } from "@paperclipai/shared";
 
 vi.mock("acpx/runtime", () => ({
   createAcpRuntime: vi.fn(),
@@ -1756,7 +1756,7 @@ describe.sequential("agent permission routes", () => {
     expect(mockIssueService.list).toHaveBeenCalledWith(companyId, {
       touchedByUserId: "board-user",
       inboxArchivedByUserId: "board-user",
-      status: "backlog,todo,in_progress,in_review,blocked,done",
+      status: INBOX_MINE_ISSUE_STATUS_FILTER,
       limit: 500,
     });
   });

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { INBOX_MINE_ISSUE_STATUS_FILTER } from "@paperclipai/shared";
 import { accessApi } from "../api/access";
 import { ApiError } from "../api/client";
 import { inboxDismissalsApi } from "../api/inboxDismissals";
@@ -25,7 +26,7 @@ import {
   READ_ITEMS_KEY,
 } from "../lib/inbox";
 
-const INBOX_ISSUE_STATUSES = "backlog,todo,in_progress,in_review,blocked,done";
+const INBOX_ISSUE_STATUSES = INBOX_MINE_ISSUE_STATUS_FILTER;
 const INBOX_BADGE_ISSUE_LIMIT = 500;
 const INBOX_BADGE_HEARTBEAT_RUN_LIMIT = 200;
 const INBOX_BADGE_HOT_PATH_STALE_MS = 30_000;
