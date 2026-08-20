@@ -13,6 +13,7 @@ vi.mock("acpx/runtime", () => ({
 
 const agentId = "11111111-1111-4111-8111-111111111111";
 const companyId = "22222222-2222-4222-8222-222222222222";
+const wakeupRequestId = "55555555-5555-4555-8555-555555555555";
 
 const baseAgent = {
   id: agentId,
@@ -84,6 +85,11 @@ const mockHeartbeatService = vi.hoisted(() => ({
   cancelRun: vi.fn(),
   cancelQueuedRun: vi.fn(),
   cancelInvocationsForAgents: vi.fn(),
+}));
+
+const mockAgentWakeupRequestService = vi.hoisted(() => ({
+  getById: vi.fn(),
+  cancel: vi.fn(),
 }));
 
 const mockIssueApprovalService = vi.hoisted(() => ({
@@ -162,6 +168,10 @@ function registerModuleMocks() {
     heartbeatService: () => mockHeartbeatService,
   }));
 
+  vi.doMock("../services/agent-wakeup-requests.js", () => ({
+    agentWakeupRequestService: () => mockAgentWakeupRequestService,
+  }));
+
   vi.doMock("../services/issue-approvals.js", () => ({
     issueApprovalService: () => mockIssueApprovalService,
   }));
@@ -203,6 +213,7 @@ function registerModuleMocks() {
     builtInAgentService: () => mockBuiltInAgentService,
     companySkillService: () => mockCompanySkillService,
     budgetService: () => mockBudgetService,
+    agentWakeupRequestService: () => mockAgentWakeupRequestService,
     heartbeatService: () => mockHeartbeatService,
     ISSUE_LIST_DEFAULT_LIMIT: 500,
     issueApprovalService: () => mockIssueApprovalService,
@@ -292,6 +303,7 @@ describe.sequential("agent permission routes", () => {
     vi.doUnmock("../services/budgets.js");
     vi.doUnmock("../services/company-skills.js");
     vi.doUnmock("../services/heartbeat.js");
+    vi.doUnmock("../services/agent-wakeup-requests.js");
     vi.doUnmock("../services/index.js");
     vi.doUnmock("../services/instance-settings.js");
     vi.doUnmock("../services/issue-approvals.js");
@@ -335,6 +347,8 @@ describe.sequential("agent permission routes", () => {
     mockHeartbeatService.cancelRun.mockReset();
     mockHeartbeatService.cancelQueuedRun.mockReset();
     mockHeartbeatService.cancelInvocationsForAgents.mockReset();
+    mockAgentWakeupRequestService.getById.mockReset();
+    mockAgentWakeupRequestService.cancel.mockReset();
     mockIssueApprovalService.linkManyForApproval.mockReset();
     mockIssueService.list.mockReset();
     mockSecretService.normalizeAdapterConfigForPersistence.mockReset();
@@ -1908,5 +1922,144 @@ describe.sequential("agent permission routes", () => {
     expect(res.status).toBe(409);
     expect(res.body).toMatchObject({ error: "heartbeat_run_not_queued", status: "running" });
     expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+  });
+
+  it("cancels an unclaimed wakeup request once and writes one audit record", async () => {
+    const deferredWakeup = {
+      id: wakeupRequestId,
+      companyId,
+      agentId,
+      status: "deferred_issue_execution",
+      runId: null,
+    };
+    const cancelledWakeup = {
+      ...deferredWakeup,
+      status: "cancelled",
+      error: "Stale completed issue",
+    };
+    mockAgentWakeupRequestService.getById.mockResolvedValue(deferredWakeup);
+    mockAgentWakeupRequestService.cancel
+      .mockResolvedValueOnce({
+        outcome: "cancelled",
+        previousStatus: "deferred_issue_execution",
+        wakeupRequest: cancelledWakeup,
+      })
+      .mockResolvedValueOnce({
+        outcome: "already_cancelled",
+        wakeupRequest: cancelledWakeup,
+      });
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const first = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agent-wakeup-requests/${wakeupRequestId}/cancel`)
+      .send({ reason: "Stale completed issue" }));
+    const repeated = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agent-wakeup-requests/${wakeupRequestId}/cancel`)
+      .send({ reason: "Repeated operator request" }));
+
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ outcome: "cancelled" });
+    expect(repeated.status).toBe(200);
+    expect(repeated.body).toMatchObject({ outcome: "already_cancelled" });
+    expect(mockAgentWakeupRequestService.cancel).toHaveBeenNthCalledWith(
+      1,
+      wakeupRequestId,
+      companyId,
+      "Stale completed issue",
+      { actorType: "user", actorId: "board-user" },
+    );
+  }, 20_000);
+
+  it("hides wakeup requests outside the caller company scope", async () => {
+    mockAgentWakeupRequestService.getById.mockResolvedValue({
+      id: wakeupRequestId,
+      companyId: "33333333-3333-4333-8333-333333333333",
+      agentId,
+      status: "queued",
+      runId: null,
+    });
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agent-wakeup-requests/${wakeupRequestId}/cancel`)
+      .send({ reason: "Stale request" }));
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("Agent wakeup request not found");
+    expect(mockAgentWakeupRequestService.cancel).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("rejects agent actors before reading a wakeup request", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-1",
+      source: "agent_key",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agent-wakeup-requests/${wakeupRequestId}/cancel`)
+      .send({ reason: "Agent must not cancel this request" }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("Board access required");
+    expect(mockAgentWakeupRequestService.getById).not.toHaveBeenCalled();
+    expect(mockAgentWakeupRequestService.cancel).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: "claimed", runId: "66666666-6666-4666-8666-666666666666" },
+    { status: "queued", runId: "77777777-7777-4777-8777-777777777777" },
+  ])("does not cancel a $status wakeup request bound to a run", async ({ status, runId }) => {
+    const protectedWakeup = {
+      id: wakeupRequestId,
+      companyId,
+      agentId,
+      status,
+      runId,
+    };
+    mockAgentWakeupRequestService.getById.mockResolvedValue(protectedWakeup);
+    mockAgentWakeupRequestService.cancel.mockResolvedValue({
+      outcome: "conflict",
+      reason: "claimed_or_run_bound",
+      wakeupRequest: protectedWakeup,
+    });
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .post(`/api/agent-wakeup-requests/${wakeupRequestId}/cancel`)
+      .send({ reason: "Stale request" }));
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      error: "agent_wakeup_request_not_cancellable",
+      reason: "claimed_or_run_bound",
+      status,
+      runId,
+    });
+    expect(mockLogActivity).not.toHaveBeenCalled();
   });
 });

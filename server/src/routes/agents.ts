@@ -16,6 +16,7 @@ import {
   isUuidLike,
   normalizeIssueIdentifier,
   resetAgentSessionSchema,
+  cancelAgentWakeupRequestSchema,
   testAdapterEnvironmentSchema,
   type AgentDesiredSkillEntry,
   type AgentSkillAssignmentMode,
@@ -148,6 +149,7 @@ import {
   changeConsentGateService,
   touchesAgentProfileChangeConsentFields,
 } from "../services/change-consent-gate.js";
+import { agentWakeupRequestService } from "../services/agent-wakeup-requests.js";
 
 const AGENT_SKILL_ASSIGNMENT_MODES = ["add", "remove", "replace"] as const;
 
@@ -380,6 +382,7 @@ export function agentRoutes(
   options.onSetupTokenLoginService?.(setupTokenLoginService);
 
   const runRedactions = createRunSecretRedactionRegistry(db);
+  const wakeupRequests = agentWakeupRequestService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
@@ -4590,6 +4593,48 @@ export function agentRoutes(
     });
     res.json(result.run);
   });
+
+  router.post(
+    "/agent-wakeup-requests/:wakeupRequestId/cancel",
+    validate(cancelAgentWakeupRequestSchema),
+    async (req, res) => {
+      assertBoard(req);
+      const wakeupRequestId = req.params.wakeupRequestId as string;
+      const existing = await getAccessibleResource(
+        req,
+        res,
+        wakeupRequests.getById(wakeupRequestId),
+        "Agent wakeup request not found",
+      );
+      if (!existing) return;
+
+      const actor = getActorInfo(req);
+      const result = await wakeupRequests.cancel(
+        wakeupRequestId,
+        existing.companyId,
+        req.body.reason,
+        {
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+        },
+      );
+      if (!result) {
+        res.status(404).json({ error: "Agent wakeup request not found" });
+        return;
+      }
+      if (result.outcome === "conflict") {
+        res.status(409).json({
+          error: "agent_wakeup_request_not_cancellable",
+          reason: result.reason,
+          status: result.wakeupRequest.status,
+          runId: result.wakeupRequest.runId,
+        });
+        return;
+      }
+
+      res.json(result);
+    },
+  );
 
   router.post("/heartbeat-runs/:runId/watchdog-decisions", async (req, res) => {
     const runId = req.params.runId as string;

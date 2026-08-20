@@ -20,6 +20,7 @@ import {
   writeStatusCardQuerySchema,
   writeStatusCardSummarySchema,
   wakeAgentSchema,
+  cancelAgentWakeupRequestSchema,
   resetAgentSessionSchema,
   agentSkillSyncSchema,
   testAdapterEnvironmentSchema,
@@ -800,6 +801,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/bootstrap/claim",
   "POST /api/heartbeat-runs/{runId}/cancel",
   "POST /api/heartbeat-runs/{runId}/cancel-queued",
+  "POST /api/agent-wakeup-requests/{wakeupRequestId}/cancel",
   "GET /api/companies/{companyId}/resource-memberships/me",
   "PUT /api/companies/{companyId}/resource-memberships/me/agents/{agentId}",
   "PUT /api/companies/{companyId}/resource-memberships/me/documents/{documentId}",
@@ -4449,6 +4451,25 @@ registry.registerPath({
   summary: "Cancel a heartbeat run only while it is still queued",
   request: { params: z.object({ runId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound, 409: r.conflict },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/agent-wakeup-requests/{wakeupRequestId}/cancel",
+  tags: ["runs"],
+  summary: "Cancel an unclaimed agent wakeup request",
+  request: {
+    params: z.object({ wakeupRequestId: z.string().uuid() }),
+    body: jsonBody(cancelAgentWakeupRequestSchema),
+  },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+  },
 });
 
 registry.registerPath({
